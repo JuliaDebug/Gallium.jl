@@ -1,4 +1,5 @@
 using Gallium
+import Base: LineEdit, REPL
 
 function RunLLDBRepl(dbg)
     # Setup cxx panel

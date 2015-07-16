@@ -83,7 +83,7 @@ function CreateCallFunctionPlan(C, rt, ectx, start_addr, arguments = UInt64[])
 
         lldb_private::Address address ($start_addr);
         llvm::SmallVector <lldb::addr_t, 6> args;
-        size_t nargs = $(endof(arguments))
+        size_t nargs = $(endof(arguments));
         for (size_t i = 0; i < nargs; ++i) {
             $:(
             arg = arguments[icxx"i;"]
@@ -91,7 +91,7 @@ function CreateCallFunctionPlan(C, rt, ectx, start_addr, arguments = UInt64[])
                 icxx"args.push_back(ABI::CallArgument(.type = TargetValue, .size = $(sizeof(arg)), .value = $(convert(UInt64,arg))));"
             else
                 icxx"args.push_back(ABI::CallArgument(.type = HostPointer, .size = $(sizeof(arg)), .value = $(pointer(arg))));"
-            end)
+            end);
         }
 
         //llvm::ArrayRef <lldb::addr_t> args;
