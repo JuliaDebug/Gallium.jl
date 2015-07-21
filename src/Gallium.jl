@@ -445,6 +445,7 @@ cxx"""
 
 include("cxxinterop.jl")
 include("target.jl")
+include("targetrepl.jl")
 
 function remote_lookup(sym)
     jl_get_binding(jl_main_module, sym)

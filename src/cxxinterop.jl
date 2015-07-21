@@ -39,8 +39,11 @@ function CreateCallFunctionPlan(C, rt, ectx, start_addr, arguments::Vector{UInt6
 
         lldb_private::EvaluateExpressionOptions options;
         options.SetDebug(false);
-        options.SetUnwindOnError(true);
+        options.SetUnwindOnError(false);
         options.SetIgnoreBreakpoints(true);
+        options.SetTryAllThreads(false);
+        options.SetOneThreadTimeoutUsec();
+        options.SetTimeoutUsec();
 
         lldb_private::Address address ($start_addr);
         llvm::ArrayRef <lldb::addr_t> args((lldb::addr_t*)$(pointer(arguments)),$(endof(arguments)));
@@ -60,7 +63,7 @@ function CreateCallFunctionPlan(C, rt, ectx, start_addr, arguments::Vector{UInt6
 
         return call_plan_sp->GetReturnValueObject();
     """
-    #ValueObjectToJulia(icxx"$VO.get();")
+    ValueObjectToJulia(icxx"$VO.get();")
 end
 
 function CreateCallFunctionPlan(C, rt, ectx, start_addr, arguments = UInt64[])
@@ -74,7 +77,6 @@ function CreateCallFunctionPlan(C, rt, ectx, start_addr, arguments = UInt64[])
         else
             return const_cast<const clang::Type*>($rt);
     """
-    @show start_addr
     VO = icxx"""
         lldb_private::StreamString &error_stream = $error_stream;
         error_stream.Write("Hello",5);
@@ -86,7 +88,7 @@ function CreateCallFunctionPlan(C, rt, ectx, start_addr, arguments = UInt64[])
 
         lldb_private::EvaluateExpressionOptions options;
         options.SetDebug(false);
-        options.SetUnwindOnError(true);
+        options.SetUnwindOnError(false);
         options.SetIgnoreBreakpoints(true);
         options.SetTryAllThreads(false);
         options.SetOneThreadTimeoutUsec();
@@ -98,11 +100,12 @@ function CreateCallFunctionPlan(C, rt, ectx, start_addr, arguments = UInt64[])
         for (size_t i = 1; i <= nargs; ++i) {
             $:(begin
               arg = arguments[icxx"return i;"]
-              if isa(arg, Cxx.CxxBuiltinTypes)
+              if isa(arg, Cxx.CxxBuiltinTypes) || isa(arg,Ptr)
                   icxx"args.push_back(
                     lldb_private::ABI::CallArgument{
                       .type = lldb_private::ABI::CallArgument::TargetValue,
-                      .size = $(sizeof(arg)), .value = $(convert(UInt64,arg))});"
+                      .size = static_cast<size_t>($(sizeof(arg))),
+                      .value = $(convert(UInt64,arg))});"
               else
                   icxx"
                     size_t argsize = $(sizeof(arg));
@@ -244,4 +247,27 @@ function _target_call(target,ectx,sym,args)
     else
         Gallium.CreateCallFunctionPlan(C, RT, ectx, faddr, args)
     end
+end
+
+#=
+size_t
+ReadMemory (const Address& addr,
+            bool prefer_file_cache,
+            void *dst,
+            size_t dst_len,
+            Error &error,
+            lldb::addr_t *load_addr_ptr = NULL);
+=#
+
+target_read(dbg::pcpp"lldb_private::Debugger",ptr,size) =
+  target_read(targets(dbg)[0],ptr,size)
+function target_read(target, ptr, size)
+    data = Array(UInt8,size)
+    icxx"""
+      lldb_private::Error error;
+      $target->GetProcessSP()->DoReadMemory($ptr, $(pointer(data)), $size, error);
+      if (error.Fail())
+          $:(error(bytestring(icxx"return error.AsCString();")));
+    """
+    return data
 end
