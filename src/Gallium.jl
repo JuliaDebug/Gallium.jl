@@ -23,11 +23,15 @@ cxx"""
 #include "lldb/Target/StackFrame.h"
 #include "lldb/Target/Thread.h"
 #include "lldb/Target/ThreadPlanCallFunction.h"
+#include "lldb/Target/ThreadPlanCallFunctionUsingABI.h"
+#include "lldb/Target/ABI.h"
 #include "lldb/Symbol/VariableList.h"
 #include "lldb/Symbol/Variable.h"
 #include "lldb/Symbol/Block.h"
 #include "lldb/Symbol/CompileUnit.h"
 #include "lldb/Symbol/ClangASTType.h"
+#include "lldb/Symbol/Type.h"
+#include "lldb/Symbol/Function.h"
 #include "lldb/Core/ValueObject.h"
 #include "lldb/Core/ValueObjectVariable.h"
 #include "lldb/Expression/ClangModulesDeclVendor.h"
@@ -308,6 +312,7 @@ dump(M::ModuleSP) = dump(icxx"$M.get();")
 @lldb_list pcpp"lldb_private::VariableList" GetSize GetVariableAtIndex
 @lldb_list pcpp"lldb_private::Thread" GetStackFrameCount GetStackFrameAtIndex
 @lldb_list pcpp"lldb_private::Module" GetNumCompileUnits GetCompileUnitAtIndex
+@lldb_list pcpp"lldb_private::Function" GetArgumentCount GetArgumentTypeAtIndex
 @_lldb_list pcpp"lldb_private::SymbolContextList" GetSize
 
 getindex(SCL::pcpp"lldb_private::SymbolContextList", idx) = icxx" (*$SCL)[$idx]; "
@@ -335,6 +340,35 @@ function getModuleForFrame(frame)
     end
 end
 
+function getTargetForFrame(frame)
+    return icxx"$frame->CalculateTarget().get();"
+end
+
+function getFunctionForFrame(frame)
+    block = icxx"$frame->GetFrameBlock();"
+    if block != C_NULL
+        return icxx"$block->CalculateSymbolContextFunction();"
+    else
+        return C_NULL
+    end
+end
+
+function getExecutionContextForFrame(frame)
+    icxx"""
+        lldb_private::ExecutionContext ctx;
+        $frame->CalculateExecutionContext(ctx);
+        ctx;
+    """
+end
+
+function getFunctionName(F)
+    if F == C_NULL
+        return "unknown"
+    else
+        bytestring(icxx"$F->GetName();")
+    end
+end
+
 const DW_LANG_JULIA = 31
 function isJuliaModule(M::pcpp"lldb_private::Module")
     icxx"$(first(M))->GetLanguage();" == DW_LANG_JULIA
@@ -348,9 +382,38 @@ function isJuliaFrame(frame::pcpp"lldb_private::StackFrame")
 end
 isJuliaFrame(frame::StackFrameSP) = isJuliaFrame(icxx"$frame.get();")
 
+function demangle_name(name)
+  first = findfirst(name,'_')
+  last = findlast(name,'_')
+  name[(first+1):(last-1)]
+end
+
+function getASTForFrame(frame)
+    mod = getModuleForFrame(frame)
+    mod == C_NULL && error("Failed to get module")
+    name = bytestring(icxx"return $mod->GetFileSpec().GetFilename();")
+    F = getFunctionForFrame(frame)
+    if contains(name, "JIT")
+        name = getFunctionName(F)
+        li = target_call(frame,:jl_function_for_symbol, [string(name,'\0')])
+    else
+        target = getTargetForFrame(frame)
+        addr = icxx"$F->GetAddressRange().GetBaseAddress().GetLoadAddress($target);"
+        li = target_call(frame,:jl_lookup_li, UInt64[addr])
+    end
+    li
+end
+
+getFunctionType(sc::rcpp"lldb_private::SymbolContext") =
+  getFunctionType(icxx"$sc.function;")
+function getFunctionType(F::pcpp"lldb_private::Function")
+    Cxx.QualType(icxx"$F->GetClangType().GetOpaqueQualType();")
+end
 
 function printJuliaStackFrame(frame)
-
+    Base.print_with_color(:blue,
+      demangle_name(getFunctionName(getFunctionForFrame(frame))))
+    println()
 end
 
 abstract TargetValue
@@ -370,6 +433,10 @@ immutable TargetPtr{T} <: TargetValue
     ptr::UInt64
 end
 addr(x::TargetPtr) = x.ptr
+
+immutable TargetLambda <: TargetValue
+    ptr::UInt64
+end
 
 cxx"""
     lldb_private::VariableList m_vl;

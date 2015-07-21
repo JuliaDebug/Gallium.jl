@@ -15,6 +15,10 @@ function lookup_function(dbg, name)
     target = targets(dbg)[0]
     @assert target != C_NULL
     ectx = Gallium.ctx(dbg)
+    lookup_function(target, ectx, name)
+end
+
+function lookup_function(target, ectx, name)
     SCL = icxx"""
         const bool append = true;
         const bool symbols_ok = true;
@@ -32,8 +36,9 @@ function lookup_function(dbg, name)
     S = first(SCL)
 end
 
-function getFunctionCallAddress(dbg,sctx)
-    target = targets(dbg)[0]
+getFunctionCallAddress(dbg,sctx) = getFunctionCallAddress(targets(dbg)[0],sctx)
+function getFunctionCallAddress(target::Union{pcpp"lldb_private::Target",
+                                              vcpp"lldb::TargetSP"},sctx)
     icxx"""
         lldb_private::AddressRange range;
         $sctx.GetAddressRange(lldb::eSymbolContextFunction,0,false,range);
@@ -56,7 +61,9 @@ function call( ::Type{TargetValue},
                         pcpp"lldb_private::ValueObjectVariable",
                         vcpp"lldb_private::ValueObjectVariable"))
     JV = ValueObjectToJulia(VO)
-    if isa(JV,pcpp"_jl_module_t")
+    if isa(JV,pcpp"_jl_lambda_info_t")
+        return TargetLambda(convert(UInt64,JV.ptr))
+    elseif isa(JV,pcpp"_jl_module_t")
         return TargetModule(TargetRef(convert(UInt64,JV.ptr)))
     elseif isa(JV,pcpp"_jl_value_t")
         return TargetRef(convert(UInt64,JV.ptr))

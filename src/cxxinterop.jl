@@ -38,6 +38,9 @@ function CreateCallFunctionPlan(C, rt, ectx, start_addr, arguments::Vector{UInt6
         }
 
         lldb_private::EvaluateExpressionOptions options;
+        options.SetDebug(false);
+        options.SetUnwindOnError(true);
+        options.SetIgnoreBreakpoints(true);
 
         lldb_private::Address address ($start_addr);
         llvm::ArrayRef <lldb::addr_t> args((lldb::addr_t*)$(pointer(arguments)),$(endof(arguments)));
@@ -71,8 +74,10 @@ function CreateCallFunctionPlan(C, rt, ectx, start_addr, arguments = UInt64[])
         else
             return const_cast<const clang::Type*>($rt);
     """
+    @show start_addr
     VO = icxx"""
         lldb_private::StreamString &error_stream = $error_stream;
+        error_stream.Write("Hello",5);
         lldb_private::ExecutionContext &ctx = $ectx;
         if (!ctx.HasThreadScope())
         {
@@ -80,37 +85,62 @@ function CreateCallFunctionPlan(C, rt, ectx, start_addr, arguments = UInt64[])
         }
 
         lldb_private::EvaluateExpressionOptions options;
+        options.SetDebug(false);
+        options.SetUnwindOnError(true);
+        options.SetIgnoreBreakpoints(true);
+        options.SetTryAllThreads(false);
+        options.SetOneThreadTimeoutUsec();
+        options.SetTimeoutUsec();
 
         lldb_private::Address address ($start_addr);
-        llvm::SmallVector <lldb::addr_t, 6> args;
+        llvm::SmallVector <lldb_private::ABI::CallArgument, 6> args;
         size_t nargs = $(endof(arguments));
-        for (size_t i = 0; i < nargs; ++i) {
-            $:(
-            arg = arguments[icxx"i;"]
-            if isa(arg, Cxx.CxxBuiltinTypes)
-                icxx"args.push_back(ABI::CallArgument(.type = TargetValue, .size = $(sizeof(arg)), .value = $(convert(UInt64,arg))));"
-            else
-                icxx"args.push_back(ABI::CallArgument(.type = HostPointer, .size = $(sizeof(arg)), .value = $(pointer(arg))));"
+        for (size_t i = 1; i <= nargs; ++i) {
+            $:(begin
+              arg = arguments[icxx"return i;"]
+              if isa(arg, Cxx.CxxBuiltinTypes)
+                  icxx"args.push_back(
+                    lldb_private::ABI::CallArgument{
+                      .type = lldb_private::ABI::CallArgument::TargetValue,
+                      .size = $(sizeof(arg)), .value = $(convert(UInt64,arg))});"
+              else
+                  icxx"
+                    size_t argsize = $(sizeof(arg));
+                    std::unique_ptr<uint8_t[]> data_ap{new uint8_t[argsize]};
+                    memcpy(data_ap.get(),$(pointer(arg)),argsize);
+                    args.push_back(lldb_private::ABI::CallArgument{
+                      .type = lldb_private::ABI::CallArgument::HostPointer,
+                      .size = argsize, .data_ap = std::move(data_ap)});
+                  "
+              end
             end);
         }
 
         //llvm::ArrayRef <lldb::addr_t> args;
 
-        lldb::ThreadPlanSP call_plan_sp(new lldb_private::ThreadPlanCallFunction(ctx.GetThreadRef(), address, $(ClangASTType(C,rt)), args, options));
+        llvm::Type *TVoid = $(Cxx.julia_to_llvm(Void));
+        lldb::ThreadPlanSP call_plan_sp(
+          new lldb_private::ThreadPlanCallFunctionUsingABI(
+            ctx.GetThreadRef(), address, *TVoid, $(ClangASTType(C,rt)), args, options));
 
         if (!call_plan_sp || !call_plan_sp->ValidatePlan (&error_stream))
             $:(error("Plan Creation Failed"));
+
+        call_plan_sp->SetIsMasterPlan(true);
+        call_plan_sp->SetOkayToDiscard(false);
 
         lldb::ExpressionResults execution_result = ctx.GetProcessRef().RunThreadPlan (ctx,
                                                                                    call_plan_sp,
                                                                                    options,
                                                                                    error_stream);
-        if (execution_result != 0)
-            $:(error(bytestring(error_stream)));
+        if (execution_result != 0) {
+            $:(error(string("Got error (",icxx"return execution_result;","): ",
+              bytestring(error_stream))));
+        }
 
         return call_plan_sp->GetReturnValueObject();
     """
-    #ValueObjectToJulia(icxx"$VO.get();")
+    ValueObjectToJulia(icxx"$VO.get();")
 end
 
 const llvmctx = icxx" std::shared_ptr<llvm::LLVMContext>{&jl_LLVMContext}; "
@@ -189,4 +219,29 @@ end
 function RunTargetREPL(dbg)
     CxxREPL.RunCxxREPL(Gallium.TargetClang; name = :targetcxx,
         prompt = "Target C++ > ", key = '>', onDoneCreator = makeOnDone(dbg))
+end
+
+function target_call(dbg::pcpp"lldb_private::Debugger",sym,args)
+    ectx = Gallium.ctx(dbg)
+    target = targets(dbg)[0]
+    _target_call(target,ectx,sym,args)
+end
+
+function target_call(frame,sym,args)
+    ectx = getExecutionContextForFrame(frame)
+    target = getTargetForFrame(frame)
+    _target_call(target,ectx,sym,args)
+end
+
+function _target_call(target,ectx,sym,args)
+    F = Gallium.lookup_function(target,ectx,string(sym))
+    faddr = Gallium.getFunctionCallAddress(target,F)
+    FTy = getFunctionType(F)
+    RT = Cxx.getFTyReturnType(FTy)
+    C = Cxx.instance(Gallium.TargetClang)
+    if isa(args, Vector{UInt64})
+        Gallium.CreateCallFunctionPlan(C, RT, ectx, faddr, args)
+    else
+        Gallium.CreateCallFunctionPlan(C, RT, ectx, faddr, args)
+    end
 end
