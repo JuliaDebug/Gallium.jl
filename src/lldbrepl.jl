@@ -10,14 +10,15 @@ function RunLLDBRepl(dbg)
         on_enter = s->true)
 
     repl = Base.active_repl
+    mirepl = repl.mi
 
     panel.on_done = REPL.respond(repl,panel) do line
         :( print(lldb_exec($dbg,$line)) )
     end
 
-    main_mode = repl.interface.modes[1]
+    main_mode = mirepl.interface.modes[1]
 
-    push!(repl.interface.modes,panel)
+    push!(mirepl.interface.modes,panel)
 
     hp = main_mode.hist
     hp.mode_mapping[:lldb] = panel

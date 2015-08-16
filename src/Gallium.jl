@@ -25,6 +25,8 @@ cxx"""
 #include "lldb/Target/ThreadPlanCallFunction.h"
 #include "lldb/Target/ThreadPlanCallFunctionUsingABI.h"
 #include "lldb/Target/ABI.h"
+#include "lldb/Symbol/SymbolVendor.h"
+#include "lldb/Symbol/SymbolFile.h"
 #include "lldb/Symbol/VariableList.h"
 #include "lldb/Symbol/Variable.h"
 #include "lldb/Symbol/Block.h"
@@ -38,12 +40,6 @@ cxx"""
 #include "lldb/Expression/IRExecutionUnit.h"
 #include "llvm/AsmParser/Parser.h"
 static llvm::ManagedStatic<lldb_private::SystemLifetimeManager> g_debugger_lifetime;
-llvm::LLVMContext &jl_LLVMContext = llvm::getGlobalContext();
-extern "C" {
-    extern void jl_error(const char *str);
-}
-extern llvm::ExecutionEngine *jl_ExecutionEngine;
-extern llvm::TargetMachine *jl_TargetMachine;
 """
 
 cxxinclude(Pkg.dir("DIDebug","src","FunctionMover.cpp"))
@@ -90,10 +86,13 @@ SetErrorFileHandle(dbg, fh::Libc.FILE, transfer_ownership) =
 function _lldb_list(T,GetSize)
     quote
         function Base.length(l::$T)
+            @assert l != C_NULL
             @cxx l->($GetSize)()
         end
+        Base.endof(l::$T) = length(l)
 
         Base.start(l::$T) = 0
+        Base.prevind(l::$T,i::Int) = i-1
         Base.next(l::$T,i) = (l[i],i+1)
         Base.done(l::$T,i) = i >= length(l)
     end
@@ -107,6 +106,7 @@ macro lldb_list(T, GetSize, GetIdx)
     esc(quote
         $(_lldb_list(T,GetSize))
         function Base.getindex(l::$T, idx)
+            @assert l != C_NULL
             if idx > length(l)
                 throw(BoundsError())
             end
@@ -139,6 +139,7 @@ import Base: length, getindex
 @lldb_sp_list rcpp"lldb_private::ThreadList" GetSize GetThreadAtIndex
 @lldb_sp_list rcpp"lldb_private::TargetList" GetNumTargets GetTargetAtIndex
 @lldb_list rcpp"lldb_private::PlatformList" GetSize GetAtIndex
+@lldb_list vcpp"lldb_private::FileSpecList" GetSize GetFileSpecPointerAtIndex
 
 # Interactivity Support
 GetCommandInterpreter(dbg::pcpp"lldb_private::Debugger") = @cxx dbg->GetCommandInterpreter()
@@ -291,6 +292,14 @@ function dump(VL::pcpp"lldb_private::VariableList")
     icxx"$VL->Dump(&$s,false);"
     bytestring(s)
 end
+
+function dump(V::pcpp"lldb_private::Variable")
+    @assert V != C_NULL
+    s = icxx"lldb_private::StreamString{};"
+    icxx"$V->Dump(&$s,false);"
+    bytestring(s)
+end
+dump(V::cxxt"lldb::VariableSP") = dump(icxx"$V.get();")
 
 function dump(B::pcpp"lldb_private::Block")
     @assert B != C_NULL
@@ -449,6 +458,23 @@ include("targetrepl.jl")
 
 function remote_lookup(sym)
     jl_get_binding(jl_main_module, sym)
+end
+
+immutable UUID{N}
+    data::NTuple{N,UInt8}
+end
+
+function Base.call{N}(::Type{UUID{N}},ptr::Ptr)
+    data = Ref{UUID{N}}()
+    ccall(:memcpy,Void,(Ref{UUID{N}},Ptr{UInt8},Csize_t),data,ptr,N)
+    data[]
+end
+
+function uuid(mod::Union{pcpp"lldb_private::Module",
+                         cxxt"lldb::ModuleSP"})
+    N = icxx"$mod->GetUUID().GetByteSize();"
+    ptr = icxx"$mod->GetUUID().GetBytes();"
+    UUID{convert(Int,N)}(ptr)
 end
 
 end # module
