@@ -14,8 +14,20 @@ function AddExternalToInstance(C::Cxx.CxxInstance, dbg, decl_map)
     """
 end
 
+function registerASTContext(ctx)
+    icxx"""
+        auto clang_ast_ctx = new lldb_private::ClangASTContext;
+        clang_ast_ctx->setASTContext($ctx);
+    """
+end
+
 function ClangASTType(C, T)
-    icxx" lldb_private::ClangASTType{&$(C.CI)->getASTContext(), clang::QualType($T,0)}; "
+    if icxx" lldb_private::ClangASTContext::GetASTContext(&$(C.CI)->getASTContext()) == NULL; "
+        registerASTContext(icxx"&$(C.CI)->getASTContext();")
+    end
+    CT = icxx" lldb_private::CompilerType{&$(C.CI)->getASTContext(), clang::QualType($T,0)}; "
+    @assert icxx" $CT.IsValid(); "
+    CT
 end
 
 function CreateCallFunctionPlan(C, rt, ectx, start_addr, arguments::Vector{UInt64} = UInt64[])
