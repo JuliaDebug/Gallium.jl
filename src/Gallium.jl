@@ -2,7 +2,7 @@ module Gallium
 
 export Initialize, debugger, SetOutputFileHandle, SetErrorFileHandle, platforms, targets,
     GetCommandInterpreter, HandleCommand, lldb_exec, ValueObjectToJulia, run_expr, SetBreakpoint,
-    SetBreakpointAtLoc
+    SetBreakpointAtLoc, current_thread
 
 using Cxx
 
@@ -17,6 +17,7 @@ cxx"""
 #include "llvm/Support/ManagedStatic.h"
 #include "lldb/Core/Debugger.h"
 #include "lldb/Core/Module.h"
+#include "lldb/Core/Section.h"
 #include "lldb/Interpreter/CommandReturnObject.h"
 #include "lldb/Interpreter/CommandInterpreter.h"
 #include "lldb/Breakpoint/StoppointCallbackContext.h"
@@ -59,10 +60,58 @@ function __init__()    Initialize()
 "
 end
 
+cxx"""
+// A silly IO Handler to force LLDB to print state changes
+class IOHandlerGallium :
+    public lldb_private::IOHandler
+{
+public:
+
+    IOHandlerGallium (lldb_private::Debugger &debugger) :
+        IOHandler (debugger, IOHandler::Type::Other)
+    {};
+
+    ~IOHandlerGallium() override
+    {
+
+    }
+
+    void
+    Run () override
+    {
+        assert(false && "I'm sorry, Dave. I'm afraid I can't do that.");
+    }
+
+    void
+    Cancel () override
+    {
+
+    }
+
+    bool
+    Interrupt () override
+    {
+        return false;
+    }
+
+    void
+    GotEOF() override
+    {
+    }
+};
+"""
+
 function debugger()
     dbg = @cxx lldb_private::Debugger::CreateInstance()
     dbg = @cxx dbg->get()
     @cxx dbg->StartEventHandlerThread()
+    icxx"""
+        lldb::IOHandlerSP io_handler_sp (new IOHandlerGallium (*$dbg));
+        if (io_handler_sp)
+        {
+            $dbg->PushIOHandler(io_handler_sp);
+        }
+    """
     dbg
 end
 
@@ -390,6 +439,8 @@ function isJuliaFrame(frame::pcpp"lldb_private::StackFrame")
 end
 isJuliaFrame(frame::StackFrameSP) = isJuliaFrame(icxx"$frame.get();")
 
+mod(frame) = icxx"$frame->GetSymbolContext (lldb::eSymbolContextModule).module_sp;"
+
 function demangle_name(name)
   first = findfirst(name,'_')
   last = findlast(name,'_')
@@ -475,5 +526,7 @@ function uuid(mod::Union{pcpp"lldb_private::Module",
     ptr = icxx"$mod->GetUUID().GetBytes();"
     UUID{convert(Int,N)}(ptr)
 end
+
+
 
 end # module

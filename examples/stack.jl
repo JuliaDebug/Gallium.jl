@@ -98,7 +98,7 @@ lift(listw.child.highlighted) do it
     catch e
         print(buf,e)
     end
-    w3.buf = buf
+    w3.buf = buf #IOBuffer(repr(takebuf_string(buf)))
     w3.cur_top = TerminalUI.element_start(w3)
     TerminalUI.invalidate(w3)
 end
