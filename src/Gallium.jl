@@ -112,6 +112,7 @@ function debugger()
             $dbg->PushIOHandler(io_handler_sp);
         }
     """
+    initialize_commands(GetCommandInterpreter(dbg))
     dbg
 end
 
@@ -388,6 +389,9 @@ function current_thread(ctx)
     icxx"$ctx.GetThreadPtr();"
 end
 
+current_thread(ctx::pcpp"lldb_private::ExecutionContext") =
+    icxx"$ctx->GetThreadPtr();"
+
 function getModuleForFrame(frame)
     block = icxx"$frame->GetFrameBlock();"
     if block != C_NULL
@@ -505,6 +509,7 @@ cxx"""
 include("cxxinterop.jl")
 include("target.jl")
 include("targetrepl.jl")
+include("commands.jl")
 
 function remote_lookup(sym)
     jl_get_binding(jl_main_module, sym)
