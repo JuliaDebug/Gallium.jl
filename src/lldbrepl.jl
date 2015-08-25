@@ -10,19 +10,24 @@ function RunLLDBRepl(dbg)
         on_enter = s->true)
 
     repl = Base.active_repl
-    mirepl = repl.mi
-
-    panel.on_done = REPL.respond(repl,panel) do line
-        :( print(lldb_exec($dbg,$line)) )
-    end
+    mirepl = isdefined(repl,:mi) ? repl.mi : repl
 
     main_mode = mirepl.interface.modes[1]
-
-    push!(mirepl.interface.modes,panel)
-
     hp = main_mode.hist
     hp.mode_mapping[:lldb] = panel
     panel.hist = hp
+
+    panel.on_done = REPL.respond(repl,panel; pass_empty = true) do line
+        # Rerun the previous command if the line is empty
+        if isempty(line)
+            :( print(lldb_exec($dbg,($hp).history[end])) )
+        else
+            :( print(lldb_exec($dbg,$line)) )
+        end
+    end
+
+
+    push!(mirepl.interface.modes,panel)
 
     const lldb_keymap = Dict{Any,Any}(
         '`' => function (s,args...)
