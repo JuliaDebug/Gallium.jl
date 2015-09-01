@@ -17,7 +17,10 @@ public:
         if (!frame)
             return true;
 
-        return frame->GetSymbolContext (lldb::eSymbolContextModule).comp_unit->GetLanguage() ==
+        auto cu = frame->GetSymbolContext (lldb::eSymbolContextModule).comp_unit;
+        if (!cu)
+            return false;
+        return cu->GetLanguage() ==
             lldb::eLanguageTypeJulia;
     }
 

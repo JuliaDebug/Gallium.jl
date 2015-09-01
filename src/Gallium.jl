@@ -5,6 +5,7 @@ export Initialize, debugger, SetOutputFileHandle, SetErrorFileHandle, platforms,
     SetBreakpointAtLoc, current_thread
 
 using Cxx
+using TerminalUI
 
 # General LLVM Headers
 include(Pkg.dir("Cxx","test","llvmincludes.jl"))
@@ -44,6 +45,7 @@ static llvm::ManagedStatic<lldb_private::SystemLifetimeManager> g_debugger_lifet
 """
 
 cxxinclude(Pkg.dir("DIDebug","src","FunctionMover.cpp"))
+include("JuliaStream.jl")
 
 # LLDB Initialization
 cxx"""
@@ -53,66 +55,54 @@ void gallium_error_handler(void *user_data, const std::string &reason, bool gen_
 }
 """
 Initialize() = icxx"g_debugger_lifetime->Initialize(llvm::make_unique<lldb_private::SystemInitializerFull>(), nullptr);"
-function __init__()    Initialize()
+function __init__()
+    Initialize()
     # LLDB's error handler isn't very useful.
-    icxx"
+    icxx"""
         remove_fatal_error_handler();
         //install_fatal_error_handler(gallium_error_handler);
-"
+    """
 end
-
-cxx"""
-// A silly IO Handler to force LLDB to print state changes
-class IOHandlerGallium :
-    public lldb_private::IOHandler
-{
-public:
-
-    IOHandlerGallium (lldb_private::Debugger &debugger) :
-        IOHandler (debugger, IOHandler::Type::Other)
-    {};
-
-    ~IOHandlerGallium() override
-    {
-
-    }
-
-    void
-    Run () override
-    {
-        assert(false && "I'm sorry, Dave. I'm afraid I can't do that.");
-    }
-
-    void
-    Cancel () override
-    {
-
-    }
-
-    bool
-    Interrupt () override
-    {
-        return false;
-    }
-
-    void
-    GotEOF() override
-    {
-    }
-};
-"""
 
 function debugger()
     dbg = @cxx lldb_private::Debugger::CreateInstance()
     dbg = @cxx dbg->get()
-    @cxx dbg->StartEventHandlerThread()
+    writableend = Base.PipeEndpoint()
+    readableend = Base.PipeEndpoint()
+    loop = icxx"""
+        auto loop = new uv_loop_t;
+        uv_loop_init(loop);
+        return loop;
+    """.ptr
+    Base.init_pipe!(writableend; writable = true, loop = loop)
+    Base.init_pipe!(readableend; readable = true, loop = Base.eventloop())
+    Base._link_pipe(readableend.handle, writableend.handle)
+    readableend.status = Base.StatusOpen
     icxx"""
+        $dbg->StartEventHandlerThread();
         lldb::IOHandlerSP io_handler_sp (new IOHandlerGallium (*$dbg));
         if (io_handler_sp)
         {
             $dbg->PushIOHandler(io_handler_sp);
         }
+        $dbg->SetOutputStream(std::shared_ptr<lldb_private::Stream>{
+            new UvPipeStream((uv_pipe_t*)$(writableend.handle))});
     """
+    writableend.handle = C_NULL
+    term = Base.Terminals.TTYTerminal("",STDIN,STDOUT,STDERR)
+    @async while !eof(readableend)
+        const CSI = TerminalUI.CSI
+        line = strip(readline(readableend),'\n')
+        w = Base.LineEdit.width(term)
+        ns = div(max(0,strwidth(line)-1),w)+1
+        print(STDOUT,string("$(CSI)s",
+                            "$(CSI)",ns,"A",
+                            "$(CSI)",ns,"S",
+                            "$(CSI)",ns,"L",
+                            "$(CSI)1G",
+                            line,
+                            "$(CSI)u"))
+    end
     initialize_commands(GetCommandInterpreter(dbg))
     dbg
 end
@@ -471,6 +461,7 @@ end
 getFunctionType(sc::rcpp"lldb_private::SymbolContext") =
   getFunctionType(icxx"$sc.function;")
 function getFunctionType(F::pcpp"lldb_private::Function")
+    @assert F != C_NULL
     Cxx.QualType(icxx"$F->GetClangType().GetOpaqueQualType();")
 end
 
