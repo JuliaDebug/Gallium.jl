@@ -4,7 +4,7 @@ include(Pkg.dir("Gallium","src","lldbrepl.jl"))
 if isdefined(Base,:active_repl)
   RunLLDBRepl(dbg)
 end
-lldb_exec(dbg,"target create ~/julia/julia")
+lldb_exec(dbg,"target create $(joinpath(JULIA_HOME,"julia"))")
 lldb_exec(dbg,"process attach --pid $(ARGS[1])")
 lldb_exec(dbg,"thread select 1")
 lldb_exec(dbg,"settings append target.source-map . $(joinpath(JULIA_HOME,"../../base"))")
