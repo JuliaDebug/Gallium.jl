@@ -7,6 +7,7 @@ end
 lldb_exec(dbg,"target create ~/julia/julia")
 lldb_exec(dbg,"process attach --pid $(ARGS[1])")
 lldb_exec(dbg,"thread select 1")
+lldb_exec(dbg,"settings append target.source-map . $(joinpath(JULIA_HOME,"../../base"))")
 
 
 #=

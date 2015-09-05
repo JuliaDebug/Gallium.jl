@@ -205,7 +205,7 @@ function ValueObjectToJulia(vo::Union(pcpp"lldb_private::ValueObject",
     if icxx"$vo->GetError().Fail();"
         error(bytestring(icxx"$vo->GetError().AsCString();"))
     end
-    clangt = Cxx.QualType(icxx"$vo->GetClangType().GetOpaqueQualType();");
+    clangt = Cxx.QualType(icxx"$vo->GetCompilerType().GetOpaqueQualType();");
     if clangt.ptr == C_NULL
         error("vo does not list a type")
     end
@@ -462,7 +462,7 @@ getFunctionType(sc::rcpp"lldb_private::SymbolContext") =
   getFunctionType(icxx"$sc.function;")
 function getFunctionType(F::pcpp"lldb_private::Function")
     @assert F != C_NULL
-    Cxx.QualType(icxx"$F->GetClangType().GetOpaqueQualType();")
+    Cxx.QualType(icxx"$F->GetCompilerType().GetOpaqueQualType();")
 end
 
 function printJuliaStackFrame(frame)
