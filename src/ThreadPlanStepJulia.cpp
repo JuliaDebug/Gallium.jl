@@ -141,7 +141,7 @@ public:
         if (symb && startsWithJlCall(symb->GetName())) {
             SetNextBranchBreakpoint();
             if (log)
-                log->Printf("Stepping through jlcall")
+                log->Printf("Stepping through jlcall");
             if (m_sub_plan_sp) {
                 m_thread.DiscardThreadPlansUpToPlan(m_sub_plan_sp);
                 m_sub_plan_sp.reset();

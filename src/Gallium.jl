@@ -13,6 +13,7 @@ include(Pkg.dir("Cxx","test","llvmincludes.jl"))
 # LLDB Headers
 cxx"""
 #define LLDB_DISABLE_PYTHON
+#include <iostream>
 #include "lldb/API/SystemInitializerFull.h"
 #include "lldb/Initialization/SystemLifetimeManager.h"
 #include "llvm/Support/ManagedStatic.h"
@@ -223,7 +224,7 @@ function ValueObjectToJulia(vo::Union(pcpp"lldb_private::ValueObject",
             data.ExtractBytes(0,data.GetByteSize(),lldb::eByteOrderLittle,$(convert(Ptr{Void},pointer(data))));
             return true;
         """ || error("Failed to get data")
-        return data[1]
+        return TargetCxxVal{jt}(data[1])
     else
         error("Unsupported")
     end
@@ -492,6 +493,11 @@ addr(x::TargetPtr) = x.ptr
 immutable TargetLambda <: TargetValue
     ptr::UInt64
 end
+
+immutable TargetCxxVal{T} <: TargetValue
+    val::T
+end
+Cxx.cpptype{T}(C,x::Type{Gallium.TargetCxxVal{T}}) = (@assert C == Cxx.instance(Gallium.TargetClang); Cxx.cpptype(C,T))
 
 cxx"""
     lldb_private::VariableList m_vl;

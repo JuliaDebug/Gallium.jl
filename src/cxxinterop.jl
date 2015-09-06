@@ -30,6 +30,7 @@ function ClangASTType(C, T)
     CT
 end
 
+#=
 function CreateCallFunctionPlan(C, rt, ectx, start_addr, arguments::Vector{UInt64} = UInt64[])
     error_stream = icxx"lldb_private::StreamString{};"
     if isa(rt,Cxx.QualType)
@@ -77,6 +78,7 @@ function CreateCallFunctionPlan(C, rt, ectx, start_addr, arguments::Vector{UInt6
     """
     ValueObjectToJulia(icxx"$VO.get();")
 end
+=#
 
 function CreateCallFunctionPlan(C, rt, ectx, start_addr, arguments = UInt64[])
     error_stream = icxx"lldb_private::StreamString{};"
@@ -112,7 +114,10 @@ function CreateCallFunctionPlan(C, rt, ectx, start_addr, arguments = UInt64[])
         for (size_t i = 1; i <= nargs; ++i) {
             $:(begin
               arg = arguments[icxx"return i;"]
-              if isa(arg, Cxx.CxxBuiltinTypes) || isa(arg,Ptr)
+              if isa(arg, Gallium.TargetCxxVal)
+                  arg = arg.val
+              end
+              if isa(arg, Cxx.CxxBuiltinTypes) || isa(arg,Ptr) || isa(arg,Cxx.CppPtr)
                   icxx"args.push_back(
                     lldb_private::ABI::CallArgument{
                       .type = lldb_private::ABI::CallArgument::TargetValue,
@@ -163,7 +168,7 @@ const llvmctx = icxx" std::shared_ptr<llvm::LLVMContext>{&jl_LLVMContext}; "
 function newModule(name)
     icxx"""
         auto m = new llvm::Module($(pointer(name)), jl_LLVMContext);
-        m->setDataLayout(jl_ExecutionEngine->getDataLayout()->getStringRepresentation());
+        m->setDataLayout(jl_ExecutionEngine->getDataLayout().getStringRepresentation());
         m->setTargetTriple(jl_TargetMachine->getTargetTriple().str());
         m;
     """
@@ -192,15 +197,18 @@ function RunModule(C, dbg, mod, F, rt; arguments = UInt64[])
     CreateCallFunctionPlan(C, rt, Gallium.ctx(dbg), addr, arguments)
 end
 
-function CreateTargetFunction(body)
+function CreateTargetFunction(Decl::pcpp"clang::Decl")
     C = Cxx.instance(Gallium.TargetClang)
-    Decl, _, _ = Cxx.CreateFunctionWithBody(C,string("{\n",body,"\n}"))
     rt = Cxx.GetFunctionReturnType(pcpp"clang::FunctionDecl"(Decl.ptr))
     llvmf = pcpp"llvm::Function"(Cxx.GetAddrOfFunction(C,Decl).ptr)
     llvmf, rt
 end
 
-function CallTargetBody(dbg, body)
+function CreateTargetFunction(body::AbstractString)
+    CreateTargetFunction(Cxx.CreateFunctionWithBody(Cxx.instance(Gallium.TargetClang),string("{\n",body,"\n}"))[1])
+end
+
+function CallTargetBody(dbg, body; arguments = Any[])
     target_shadow = Cxx.instance(Gallium.TargetClang).shadow
     target_module = Gallium.newModule("test")
     F, rt = CreateTargetFunction(body)
@@ -209,23 +217,27 @@ function CallTargetBody(dbg, body)
     MapFunction($F, &mover2);
     """
     Gallium.RunModule(Cxx.instance(Gallium.TargetClang), dbg,
-        target_module, F, Cxx.extractTypePtr(rt))
+        target_module, F, Cxx.extractTypePtr(rt); arguments = arguments)
 end
 
 function makeOnDone(dbg)
     function simpleOnDone(C)
         function (line)
+            line = string(line,"\n;")
             toplevel = CxxREPL.isTopLevelExpression(C,line)
-            @show toplevel
             if toplevel
                 Cxx.process_cxx_string(string(line,"\n;"), toplevel,
                     false, :REPL, 1, 1; compiler = C)
             else
-                VOp = CallTargetBody(dbg, line)
-                if icxx"$VOp.get();" == C_NULL
-                    return nothing
+                startvarnum, sourcebuf, exprs, isexprs, icxxs =
+                Cxx.process_body(C,line,false,:REPL,1,1)
+                source = takebuf_string(sourcebuf)
+                args = Expr(:tuple,exprs...)
+                quote
+                    t = $args
+                    decl,_,_ = Cxx.CreateFunctionWithBody(Cxx.instance($C),$source,typeof(t).parameters...)
+                    return Gallium.CallTargetBody($dbg, decl; arguments = Any[t...])
                 end
-                return ValueObjectToJulia(icxx"$VOp.get();")
             end
         end
     end
