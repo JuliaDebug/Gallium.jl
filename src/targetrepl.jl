@@ -55,7 +55,7 @@ cfunction((@eval function (\$(gensym()))($(join(names,",")))\n
     $(join([string(n," = unsafe_pointer_to_objref(",n,")") for n in names],'\n'))
     $expression
   end),
-  Any,Tuple{$(join(["Ptr{Void}" for i = 1:length(names)]))})
+  Any,Tuple{$(join(["Ptr{Void}" for i = 1:length(names)],','))})
 """
 ptr = Gallium.target_call(target,:jl_eval_string,[string(new_expr,'\0')])
 ptr = Gallium.target_call(target,:jl_unbox_voidpointer,[ptr])

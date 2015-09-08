@@ -4,7 +4,7 @@ global debugger_ans = nothing
 reset_ans() = global debugger_ans = nothing
 
 cxx"""
-class CommandObjectJuliaCallback : public lldb_private::CommandObjectParsed
+class CommandObjectJuliaCallback : public lldb_private::CommandObjectRaw
 {
 public:
   CommandObjectJuliaCallback(lldb_private::CommandInterpreter &interpreter,
@@ -13,7 +13,7 @@ public:
     const char *syntax,
     uint32_t flags,
     jl_function_t *F) :
-    CommandObjectParsed (interpreter, name, help, syntax, flags),
+    CommandObjectRaw (interpreter, name, help, syntax, flags),
     m_F(F)
   {
   }
@@ -21,10 +21,10 @@ public:
   virtual ~CommandObjectJuliaCallback() {}
 
   virtual bool
-  DoExecute (lldb_private::Args& command, lldb_private::CommandReturnObject &result)
+  DoExecute (const char * command, lldb_private::CommandReturnObject &result)
   {
       result.SetStatus (lldb::eReturnStatusSuccessFinishNoResult);
-      $:( global debugger_ans = icxx"return m_F;"(icxx"return &m_exe_ctx;",icxx"return &result;"); nothing );
+      $:( global debugger_ans = icxx"return m_F;"(icxx"return &m_exe_ctx;",icxx"return command;",icxx"return &result;"); nothing );
       return true;
   }
 private:
@@ -78,7 +78,7 @@ end
 cxxinclude(joinpath(dirname(@__FILE__),"ThreadPlanStepJulia.cpp"))
 function initialize_commands(CI)
     dbg = icxx"&$CI.GetDebugger();"
-    AddCommand(CI,"jbt") do ctx, result
+    AddCommand(CI,"jbt") do ctx, input, result
       thread = current_thread(ctx)
       for frame in thread
         isJuliaFrame(frame) || continue
@@ -87,7 +87,36 @@ function initialize_commands(CI)
       end
       nothing
     end
-    AddCommand(CI,"jobj") do ctx, result
+    AddCommand(CI,"jp") do ctx, input, result
+      input = bytestring(input)
+      frame = Gallium.current_frame(ctx)
+      vars = icxx"$frame->GetVariableList(false);"
+      target = icxx"$frame->CalculateTarget();"
+      vals = map(x->try; ValueObjectToJulia(icxx"$x.get();"); catch; nothing; end,
+        map(var->icxx"$frame->GetValueObjectForFrameVariable($var,lldb::eNoDynamicValues);",vars))
+      names = map(var->bytestring(icxx"$var->GetName();"),vars)
+      validxs = find(x->x!==nothing,vals)
+      otheridxs = collect(filter(x->!(x in validxs),1:length(names)))
+
+      # Strip out '#'
+      validxs = collect(filter(idx->!('#' in names[idx]),validxs))
+      otheridxs = collect(filter(idx->!('#' in names[idx]),otheridxs))
+
+      expression = """
+      let
+      $(join(map(name->string("local ",name),names[otheridxs]),'\n'))
+      try
+      $input
+      catch e
+      show(STDERR,e)
+      end
+      end
+      """
+      f = Gallium.entrypoint_for_julia_expression(dbg, names[validxs], expression)
+      Gallium.call_prepared_entrypoint(dbg, icxx"*$ctx;", f,
+        Ptr{Void}[convert(Ptr{Void},v.ref) for v in vals[validxs]])
+    end
+    AddCommand(CI,"jobj") do ctx, input, result
       frame = current_frame(ctx)
       mod = getModuleForFrame(frame)
       @assert mod != C_NULL
@@ -95,7 +124,7 @@ function initialize_commands(CI)
       @assert objf != C_NULL
       ReadObjectFile(objf)
     end
-    AddCommand(CI,"js") do ctx, result
+    AddCommand(CI,"js") do ctx, input, result
       thread = current_thread(ctx)
       frame = first(thread)
       icxx"""

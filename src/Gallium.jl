@@ -20,6 +20,7 @@ cxx"""
 #include "lldb/Core/Debugger.h"
 #include "lldb/Core/Module.h"
 #include "lldb/Core/Section.h"
+#include "lldb/Interpreter/CommandObject.h"
 #include "lldb/Interpreter/CommandReturnObject.h"
 #include "lldb/Interpreter/CommandInterpreter.h"
 #include "lldb/Breakpoint/StoppointCallbackContext.h"
@@ -198,6 +199,22 @@ function lldb_exec(dbg,p)
 end
 
 # Expression Support
+function retrieveData(vo,jt)
+    @assert sizeof(jt) == icxx"$vo->GetByteSize();";
+    data = Array(jt,1);
+    icxx"""
+        lldb_private::DataExtractor data;
+        lldb_private::Error error;
+        $vo->GetData(data,error);
+        if (error.Fail()) {
+            return false;
+        }
+        data.ExtractBytes(0,data.GetByteSize(),lldb::eByteOrderLittle,$(convert(Ptr{Void},pointer(data))));
+        return true;
+    """ || error("Failed to get data")
+    data[1]
+end
+
 ValueObjectToJulia(vo::Union(vcpp"lldb_private::ValueObject",vcpp"lldb_private::ValueObjectVariable")) =
     ValueObjectToJulia(icxx"&$vo;")
 function ValueObjectToJulia(vo::Union(pcpp"lldb_private::ValueObject",
@@ -212,19 +229,9 @@ function ValueObjectToJulia(vo::Union(pcpp"lldb_private::ValueObject",
     end
     jt = Cxx.juliatype(clangt)
     if isbits(jt)
-        @assert sizeof(jt) == icxx"$vo->GetByteSize();";
-        data = Array(jt,1);
-        icxx"""
-            lldb_private::DataExtractor data;
-            lldb_private::Error error;
-            $vo->GetData(data,error);
-            if (error.Fail()) {
-                return false;
-            }
-            data.ExtractBytes(0,data.GetByteSize(),lldb::eByteOrderLittle,$(convert(Ptr{Void},pointer(data))));
-            return true;
-        """ || error("Failed to get data")
-        return data[1]
+        return retrieveData(vo,jt)
+    elseif jt === Any
+        return TargetRef(retrieveData(vo,UInt64))
     else
         error("Unsupported")
     end
