@@ -35,14 +35,6 @@ end
 
 ####################
 
-function ReadObjectFile(objfile)
-    osize = icxx"$(objfile)->GetByteSize();"
-    data = Array(UInt8,osize)
-    icxx"$(objfile)->CopyData(0,$osize,$(pointer(data)));"
-    buf = IOBuffer(data)
-    oh = readmeta(buf)
-end
-
 objcache = Dict{Any,Any}()
 
 function processed_cus(frame::Union{pcpp"lldb_private::StackFrame",
@@ -54,8 +46,8 @@ function processed_cus(frame::Union{pcpp"lldb_private::StackFrame",
     mod = icxx"$frame->GetFrameBlock()->CalculateSymbolContextModule();"
     id = Gallium.uuid(mod)
     if !haskey(objcache,id)
-        oh = ReadObjectFile(icxx"$mod->GetObjectFile();")
-        debugoh = ReadObjectFile(icxx"$mod->GetSymbolVendor()->
+        oh = Gallium.ReadObjectFile(icxx"$mod->GetObjectFile();")
+        debugoh = Gallium.ReadObjectFile(icxx"$mod->GetSymbolVendor()->
                 GetSymbolFile()->GetObjectFile();")
         dbgs = debugsections(debugoh);
         strtab = load_strtab(dbgs.debug_str)

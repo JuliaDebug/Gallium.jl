@@ -58,7 +58,7 @@ public:
     }
 
     bool
-    DoPlanExplainsStop (lldb_private::Event *event_ptr) {
+    DoPlanExplainsStop (lldb_private::Event *event_ptr) override {
         if (AtOurBreakpoint())
             return true;
         return ThreadPlanStepInRange::DoPlanExplainsStop(event_ptr);
@@ -74,7 +74,7 @@ public:
     }
 
     bool
-    ShouldStop (lldb_private::Event *event_ptr)
+    ShouldStop (lldb_private::Event *event_ptr) override
     {
         lldb_private::Log *log(lldb_private::GetLogIfAllCategoriesSet (LIBLLDB_LOG_STEP));
 
@@ -163,8 +163,15 @@ public:
         );
     }
 
+    bool MischiefManaged() override {
+        if (IsPlanComplete()) {
+            m_thread.CalculateTarget()->RemoveBreakpointByID(m_break->GetID());
+        }
+        return ThreadPlanStepInRange::MischiefManaged();
+    }
+
     void
-    GetDescription (lldb_private::Stream *s, lldb::DescriptionLevel level)
+    GetDescription (lldb_private::Stream *s, lldb::DescriptionLevel level) override
     {
         if (level == lldb::eDescriptionLevelBrief)
         {

@@ -1,3 +1,8 @@
+using ObjFileBase
+
+global debugger_ans = nothing
+reset_ans() = global debugger_ans = nothing
+
 cxx"""
 class CommandObjectJuliaCallback : public lldb_private::CommandObjectParsed
 {
@@ -19,7 +24,7 @@ public:
   DoExecute (lldb_private::Args& command, lldb_private::CommandReturnObject &result)
   {
       result.SetStatus (lldb::eReturnStatusSuccessFinishNoResult);
-      $:( icxx"return m_F;"(icxx"return &m_exe_ctx;",icxx"return &result;"); nothing );
+      $:( global debugger_ans = icxx"return m_F;"(icxx"return &m_exe_ctx;",icxx"return &result;"); nothing );
       return true;
   }
 private:
@@ -52,11 +57,22 @@ let entrypoint = nothing
     end
 
     li = Gallium.getASTForFrame(frame).ptr
+    if li == C_NULL
+      return "invalid"
+    end
     str = Gallium.call_prepared_entrypoint(dbg, ctx, entrypoint, Ptr{Void}[li])
     ptr = Gallium.target_call(dbg,:jl_bytestring_ptr,[str.ptr])
     size = Gallium.target_call(dbg,:jl_bytestring_length,[str.ptr])
     bytestring(Gallium.target_read(dbg,convert(UInt64,ptr),size))
   end
+end
+
+function ReadObjectFile(objfile)
+    osize = icxx"$(objfile)->GetByteSize();"
+    data = Array(UInt8,osize)
+    icxx"$(objfile)->CopyData(0,$osize,$(pointer(data)));"
+    buf = IOBuffer(data)
+    oh = readmeta(buf)
 end
 
 cxxinclude(joinpath(dirname(@__FILE__),"ThreadPlanStepJulia.cpp"))
@@ -69,6 +85,15 @@ function initialize_commands(CI)
         println(STDOUT,getFrameDescription(dbg,icxx"*$ctx;",frame))
         #println(STDOUT,Gallium.dump(frame))
       end
+      nothing
+    end
+    AddCommand(CI,"jobj") do ctx, result
+      frame = current_frame(ctx)
+      mod = getModuleForFrame(frame)
+      @assert mod != C_NULL
+      objf = icxx"$mod->GetObjectFile();"
+      @assert objf != C_NULL
+      ReadObjectFile(objf)
     end
     AddCommand(CI,"js") do ctx, result
       thread = current_thread(ctx)
@@ -119,5 +144,6 @@ function initialize_commands(CI)
             }
         }
       """
+      nothing
     end
 end

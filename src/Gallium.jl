@@ -224,7 +224,7 @@ function ValueObjectToJulia(vo::Union(pcpp"lldb_private::ValueObject",
             data.ExtractBytes(0,data.GetByteSize(),lldb::eByteOrderLittle,$(convert(Ptr{Void},pointer(data))));
             return true;
         """ || error("Failed to get data")
-        return TargetCxxVal{jt}(data[1])
+        return data[1]
     else
         error("Unsupported")
     end
@@ -377,6 +377,9 @@ function current_frame(ctx)
     icxx"$ctx.GetFramePtr();"
 end
 
+current_frame(ctx::pcpp"lldb_private::ExecutionContext") =
+    icxx"$ctx->GetFramePtr();"
+
 function current_thread(ctx)
     icxx"$ctx.GetThreadPtr();"
 end
@@ -385,12 +388,7 @@ current_thread(ctx::pcpp"lldb_private::ExecutionContext") =
     icxx"$ctx->GetThreadPtr();"
 
 function getModuleForFrame(frame)
-    block = icxx"$frame->GetFrameBlock();"
-    if block != C_NULL
-        return icxx"$block->CalculateSymbolContextModule();"
-    else
-        return C_NULL
-    end
+    icxx"$frame->GetSymbolContext(lldb::eSymbolContextModule).module_sp.get();"
 end
 
 function getTargetForFrame(frame)
@@ -402,7 +400,7 @@ function getFunctionForFrame(frame)
     if block != C_NULL
         return icxx"$block->CalculateSymbolContextFunction();"
     else
-        return C_NULL
+        return pcpp"lldb_private::Function"(C_NULL)
     end
 end
 
@@ -428,12 +426,16 @@ function isJuliaModule(M::pcpp"lldb_private::Module")
 end
 isJuliaModule(M::ModuleSP) = isJuliaModule(icxx"$M.get();")
 
-function isJuliaFrame(frame::pcpp"lldb_private::StackFrame")
+function isJuliaFrame(frame::pcpp"lldb_private::StackFrame", include_jlcall=false)
     mod = getModuleForFrame(frame)
     mod == C_NULL && return false
-    isJuliaModule(mod)
+    ret = isJuliaModule(mod)
+    ret || return ret
+    if !include_jlcall
+        ret &= !startswith(getFunctionName(getFunctionForFrame(frame)),"jlcall")
+    end
 end
-isJuliaFrame(frame::StackFrameSP) = isJuliaFrame(icxx"$frame.get();")
+isJuliaFrame(frame::StackFrameSP,include_jlcall=false) = isJuliaFrame(icxx"$frame.get();")
 
 mod(frame) = icxx"$frame->GetSymbolContext (lldb::eSymbolContextModule).module_sp;"
 
@@ -488,6 +490,11 @@ addr(x::TargetModule) = addr(x.mod)
 immutable TargetPtr{T} <: TargetValue
     ptr::UInt64
 end
+function Cxx.cpptype{T}(C,x::Type{Gallium.TargetPtr{T}})
+    @assert C == Cxx.instance(Gallium.TargetClang)
+    T <: Cxx.CppPtr ? Cxx.cpptype(C,T) : Cxx.cpptype(C,Ptr{T})
+end
+Base.convert(::Type{UInt64}, val::TargetPtr) = val.ptr
 addr(x::TargetPtr) = x.ptr
 
 immutable TargetLambda <: TargetValue
@@ -498,6 +505,7 @@ immutable TargetCxxVal{T} <: TargetValue
     val::T
 end
 Cxx.cpptype{T}(C,x::Type{Gallium.TargetCxxVal{T}}) = (@assert C == Cxx.instance(Gallium.TargetClang); Cxx.cpptype(C,T))
+Base.convert(::Type{UInt64}, val::TargetCxxVal) = Base.convert(UInt64, val.val)
 
 cxx"""
     lldb_private::VariableList m_vl;
@@ -530,6 +538,6 @@ function uuid(mod::Union{pcpp"lldb_private::Module",
     UUID{convert(Int,N)}(ptr)
 end
 
-
+Base.convert(::Type{UInt64},x::Cxx.CppPtr) = Base.convert(UInt64,x.ptr)
 
 end # module

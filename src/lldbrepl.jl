@@ -20,9 +20,9 @@ function RunLLDBRepl(dbg)
     panel.on_done = REPL.respond(repl,panel; pass_empty = true) do line
         # Rerun the previous command if the line is empty
         if isempty(line)
-            :( print(lldb_exec($dbg,($hp).history[end])) )
+            :( Gallium.reset_ans(); print(lldb_exec($dbg,($hp).history[end])); Gallium.debugger_ans )
         else
-            :( print(lldb_exec($dbg,$line)) )
+            :( Gallium.reset_ans(); print(lldb_exec($dbg,$line)); Gallium.debugger_ans )
         end
     end
 

@@ -61,6 +61,8 @@ function call( ::Type{TargetValue},
                         pcpp"lldb_private::ValueObjectVariable",
                         vcpp"lldb_private::ValueObjectVariable"))
     JV = ValueObjectToJulia(VO)
+end
+function call( ::Type{TargetValue}, JV)
     if isa(JV,pcpp"_jl_lambda_info_t")
         return TargetLambda(convert(UInt64,JV.ptr))
     elseif isa(JV,pcpp"_jl_module_t")
@@ -72,7 +74,7 @@ function call( ::Type{TargetValue},
     elseif isa(JV,Ptr)
         return TargetPtr{typeof(JV).parameters[1]}(convert(UInt64,JV))
     else
-        return JV
+        return TargetCxxVal{typeof(JV)}(JV)
     end
 end
 

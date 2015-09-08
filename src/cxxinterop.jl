@@ -117,7 +117,8 @@ function CreateCallFunctionPlan(C, rt, ectx, start_addr, arguments = UInt64[])
               if isa(arg, Gallium.TargetCxxVal)
                   arg = arg.val
               end
-              if isa(arg, Cxx.CxxBuiltinTypes) || isa(arg,Ptr) || isa(arg,Cxx.CppPtr)
+              if isa(typeof(arg), Cxx.CxxBuiltinTypes) || isa(arg,Ptr) || isa(arg,Cxx.CppPtr) ||
+                isa(arg,TargetPtr)
                   icxx"args.push_back(
                     lldb_private::ABI::CallArgument{
                       .type = lldb_private::ABI::CallArgument::TargetValue,
@@ -236,7 +237,8 @@ function makeOnDone(dbg)
                 quote
                     t = $args
                     decl,_,_ = Cxx.CreateFunctionWithBody(Cxx.instance($C),$source,typeof(t).parameters...)
-                    return Gallium.CallTargetBody($dbg, decl; arguments = Any[t...])
+                    return Gallium.TargetValue(
+                        Gallium.CallTargetBody($dbg, decl; arguments = Any[t...]))
                 end
             end
         end
@@ -294,4 +296,12 @@ function target_read(target, ptr, size)
           $:(error(bytestring(icxx"return error.AsCString();")));
     """
     return data
+end
+
+function retrieve(dbg, x::Gallium.TargetPtr{pcpp"jl_array_t"})
+   xptr = x.ptr
+   ptr = Gallium.target_call(dbg,:jl_array_ptr,[xptr])
+   size = Gallium.target_call(dbg,:jl_array_length,[xptr])
+   @show (ptr,size)
+   Gallium.target_read(dbg,convert(UInt64,ptr),convert(UInt64,size))
 end

@@ -38,6 +38,7 @@ jl_array_t *GetBitcodeForFunction(void *f) {
      std::string Data;
      llvm::raw_string_ostream OS(Data);
      llvm::WriteBitcodeToFile(m, OS);
+     OS.flush();
 
      return jl_pchar_to_array(Data.data(),Data.size());
  }

@@ -1,17 +1,19 @@
 import Base: LineEdit, REPL
 
 function createTargetREPL(dbg)
+
+  mirepl = isdefined(Base.active_repl,:mi) ? Base.active_repl.mi : Base.active_repl
   repl = Base.active_repl
-  main_mode = repl.interface.modes[1]
+  main_mode = mirepl.interface.modes[1]
   panel = LineEdit.Prompt("julia> ";
     # Copy colors from the prompt object
     prompt_prefix = "\033[0m\033[32m",
     prompt_suffix = Base.input_color,
-    keymap_func_data = repl,
+    keymap_func_data = mirepl,
     complete = main_mode.complete,
     on_enter = REPL.return_callback)
 
-  push!(repl.interface.modes,panel)
+  push!(mirepl.interface.modes,panel)
 
   panel.on_done = REPL.respond(repl,panel) do line
     quote
@@ -55,7 +57,6 @@ cfunction((@eval function (\$(gensym()))($(join(names,",")))\n
   end),
   Any,Tuple{$(join(["Ptr{Void}" for i = 1:length(names)]))})
 """
-@show new_expr
 ptr = Gallium.target_call(target,:jl_eval_string,[string(new_expr,'\0')])
 ptr = Gallium.target_call(target,:jl_unbox_voidpointer,[ptr])
 end
