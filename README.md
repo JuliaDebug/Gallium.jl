@@ -13,7 +13,7 @@ This will add several REPL modes:
 - Global target julia mode (activated via `\ `). Evaluate julia code at global scope in the inferior
 - Host C++ mode (activated via `<`). Evaluate C++ code in the host. Useful to interact with LLDB's C++ API
 - Target C++ mode (activated via `>`). Evaluate C++ code in the target
-- LLDB mode (activated via ``` \` ```). Run an lldb command
+- LLDB mode (activated via ``` ` ```). Run an lldb command
 
 The LLDB command prompt supports all your usual debugger commands (`b`, `bt`, `s`, `n`, `finish`), as well as the following custom commands:
 - `js` - Step through julia code. Including stepping through indirect dispatch
