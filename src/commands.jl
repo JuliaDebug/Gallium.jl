@@ -44,6 +44,12 @@ function AddCommand(F::Function, CI, name; help = "", syntax = name)
   """)
 end
 
+function retrieve_string(dbg,str)
+  ptr = Gallium.target_call(dbg,:jl_bytestring_ptr,[str.ptr])
+  size = Gallium.target_call(dbg,:jl_bytestring_length,[str.ptr])
+  bytestring(Gallium.target_read(dbg,convert(UInt64,ptr),size))
+end
+
 function getFrameDescription
 end
 let entrypoint = nothing
@@ -55,15 +61,28 @@ let entrypoint = nothing
       takebuf_string(buf)
       """)
     end
-
     li = Gallium.getASTForFrame(frame).ptr
     if li == C_NULL
       return "invalid"
     end
     str = Gallium.call_prepared_entrypoint(dbg, ctx, entrypoint, Ptr{Void}[li])
-    ptr = Gallium.target_call(dbg,:jl_bytestring_ptr,[str.ptr])
-    size = Gallium.target_call(dbg,:jl_bytestring_length,[str.ptr])
-    bytestring(Gallium.target_read(dbg,convert(UInt64,ptr),size))
+    retrieve_string(dbg,str)
+  end
+end
+
+function retrieve_repr
+end
+let entrypoint = nothing
+  function retrieve_repr(dbg,ctx,val)
+    if entrypoint === nothing
+      entrypoint = Gallium.entrypoint_for_julia_expression(dbg,"x","""
+      buf = IOBuffer()
+      show(buf,x)
+      takebuf_string(buf)
+      """)
+    end
+    retrieve_string(dbg,
+      Gallium.call_prepared_entrypoint(dbg, ctx, entrypoint, Ptr{Void}[convert(UInt64,val)]))
   end
 end
 
@@ -113,8 +132,9 @@ function initialize_commands(CI)
       end
       """
       f = Gallium.entrypoint_for_julia_expression(dbg, names[validxs], expression)
-      Gallium.call_prepared_entrypoint(dbg, icxx"*$ctx;", f,
+      val = Gallium.call_prepared_entrypoint(dbg, icxx"*$ctx;", f,
         Ptr{Void}[convert(Ptr{Void},v.ref) for v in vals[validxs]])
+      Base.Text(retrieve_repr(dbg,icxx"*$ctx;",val))
     end
     AddCommand(CI,"jobj") do ctx, input, result
       frame = current_frame(ctx)
