@@ -1,3 +1,5 @@
+@osx_only ENV["LLDB_DEBUGSERVER_PATH"] =
+  "/Applications/Xcode.app/Contents/SharedFrameworks/LLDB.framework/Resources/debugserver"
 using Gallium, Cxx
 dbg = debugger()
 include(Pkg.dir("Gallium","src","lldbrepl.jl"))
@@ -16,7 +18,7 @@ lldb_exec(dbg,"target create $(joinpath(JULIA_HOME,"julia"))")
 lldb_exec(dbg,"process attach --pid $(ARGS[1])")
 lldb_exec(dbg,"thread select 1")
 lldb_exec(dbg,"settings append target.source-map . $(joinpath(JULIA_HOME,"../../base"))")
-
+lldb_exec(dbg,"settings set target.process.optimization-warnings false")
 
 #=
 C = Cxx.instance(Gallium.TargetClang)

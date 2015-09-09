@@ -30,6 +30,8 @@ cxx"""
 #include "lldb/Target/ThreadPlanStepInRange.h"
 #include "lldb/Target/ThreadPlanCallFunctionUsingABI.h"
 #include "lldb/Target/ABI.h"
+#include "lldb/Target/UnixSignals.h"
+#include "lldb/Host/ThreadLauncher.h"
 #include "lldb/Symbol/SymbolVendor.h"
 #include "lldb/Symbol/SymbolFile.h"
 #include "lldb/Symbol/VariableList.h"
@@ -47,6 +49,7 @@ static llvm::ManagedStatic<lldb_private::SystemLifetimeManager> g_debugger_lifet
 """
 
 cxxinclude(Pkg.dir("DIDebug","src","FunctionMover.cpp"))
+cxxinclude(joinpath(dirname(@__FILE__),"EventHandler.cpp"))
 include("JuliaStream.jl")
 
 # LLDB Initialization
@@ -67,8 +70,7 @@ function __init__()
 end
 
 function debugger()
-    dbg = @cxx lldb_private::Debugger::CreateInstance()
-    dbg = @cxx dbg->get()
+    dbg = icxx"lldb_private::Debugger::CreateInstance().get();"
     writableend = Base.PipeEndpoint()
     readableend = Base.PipeEndpoint()
     loop = icxx"""
@@ -81,7 +83,8 @@ function debugger()
     Base._link_pipe(readableend.handle, writableend.handle)
     readableend.status = Base.StatusOpen
     icxx"""
-        $dbg->StartEventHandlerThread();
+        auto h = new JuliaEventHandler($dbg);
+        h->StartJuliaEventHandlerThread();
         lldb::IOHandlerSP io_handler_sp (new IOHandlerGallium (*$dbg));
         if (io_handler_sp)
         {
