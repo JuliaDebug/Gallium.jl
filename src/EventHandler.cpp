@@ -124,12 +124,12 @@ public:
 
                 lldb::StackFrameSP top_frame = thread_sp->GetStackFrameAtIndex(0);
 
-                strm->Printf("Thread #%llu stopped",thread_sp->GetIndexID());
+                strm->Printf("Thread #%u stopped",thread_sp->GetIndexID());
                 if (top_frame) {
                     lldb_private::SymbolContext frame_sc(top_frame->GetSymbolContext (lldb::eSymbolContextLineEntry));
                     if (frame_sc.line_entry.line != 0 && frame_sc.line_entry.file)
                         strm->Printf(" at %s:%d",frame_sc.line_entry.file.GetCString(),frame_sc.line_entry.line);
-                    strm->Printf("\n")
+                    strm->Printf("\n");
                     top_frame->GetStatus(*strm,false,true,NULL);
                 }
 
