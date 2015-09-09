@@ -112,9 +112,8 @@ function debugger()
     dbg
 end
 
-
 # Create a clang instance
-TargetClang = Cxx.new_clang_instance()
+TargetClang = Cxx.new_clang_instance(false)
 
 # Constants
 const eLazyBoolCalculate = cast(Int32(-1),vcpp"lldb_private::LazyBool")

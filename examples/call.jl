@@ -12,6 +12,8 @@ if isdefined(Base,:active_repl)
   Cxx.addHeaderDir(Gallium.TargetClang,joinpath(JULIA_HOME,"../../src/support"))
   Cxx.addHeaderDir(Gallium.TargetClang,joinpath(JULIA_HOME,"../../usr/include"))
   cxxparse(Gallium.TargetClang,"""#include "julia.h" """)
+  # Do this after julia.h
+  Cxx.register_booth(Gallium.TargetClang)
   cxxparse(Gallium.TargetClang,readall(joinpath(dirname(@__FILE__),"../src/boottarget.cpp")))
 end
 lldb_exec(dbg,"target create $(joinpath(JULIA_HOME,"julia"))")
