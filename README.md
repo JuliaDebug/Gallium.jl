@@ -42,4 +42,48 @@ LLDB> jobj
 julia> oh = ans
 julia> collect(DWARF.DIETrees(ObjFileBase.debugsections(oh)))
 ```
+
+# Building Gallium
+Gallium requires custom versions of julia, LLVM, Clang, LLDB and libuv. The easiest way to obtain these
+is to checkout the kf/gallium branch of julia, which will attempt to check out the correct branches and
+build everything from scratch. Note that this only works on a fresh install. If you already have a version
+of llvm-svn checked out you will manually needs to go in and check out the kf/gallium branch on from
+JuliaLang/{llvm, clang, lldb}. After the julia build succeeds, you may need to apply the following patch
+to Cxx.jl:
 ```
+diff --git a/src/bootstrap.cpp b/src/bootstrap.cpp
+index 01ff792..8dca780 100644
+--- a/src/bootstrap.cpp
++++ b/src/bootstrap.cpp
+@@ -846,8 +846,8 @@ DLLEXPORT void init_clang_instance(C, const char *Triple) {
+     Cxx->CI->getLangOpts().Bool = 1;
+     Cxx->CI->getLangOpts().WChar = 1;
+     Cxx->CI->getLangOpts().C99 = 1;
+-    Cxx->CI->getLangOpts().RTTI = 1;
+-    Cxx->CI->getLangOpts().RTTIData = 1;
++    Cxx->CI->getLangOpts().RTTI = 0;
++    Cxx->CI->getLangOpts().RTTIData = 0;
+     Cxx->CI->getLangOpts().ImplicitInt = 0;
+     Cxx->CI->getLangOpts().PICLevel = 2;
+     Cxx->CI->getLangOpts().Exceptions = 1;          // exception handling
+```
+Finally, you'll need to run the following series of commands at the julia prompt:
+```
+Pkg.clone("https://github.com/Keno/Cxx.jl.git")
+Pkg.build("Cxx")
+Pkg.add("Reactive")
+Pkg.clone("git@github.com:Keno/JITTools.jl.git")
+Pkg.clone("git@github.com:Keno/DIDebug.jl.git")
+Pkg.clone("git@github.com:Keno/TerminalUI.jl.git")
+Pkg.clone("git@github.com:Keno/Gallium.jl.git")
+Pkg.clone("git@github.com:Keno/ObjFileBase.jl.git")
+Pkg.clone("git@github.com:Keno/MachO.jl.git")
+Pkg.clone("git@github.com:Keno/ELF.jl.git")
+Pkg.clone("git@github.com:Keno/AbstractTrees.jl.git")
+Pkg.clone("git@github.com:Keno/VT100.jl.git")
+```
+
+# Common Troubles
+
+- `unable to connect` on Linux: Make sure ptrace protection is disabled. You can do this manually by running `echo 0 > /proc/sys/kernel/yama/ptrace_scope`
+
