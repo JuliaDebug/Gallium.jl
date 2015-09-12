@@ -5,7 +5,7 @@
 For now, the easiest way to use Gallium is through the examples/call.jl script.
 
 ```julia
-julia> ARGS = ["1234"]
+julia> ARGS = ["1234"]  # PID of the Julia process you wish to control
 julia> include("call.jl")
 ```
 
@@ -85,5 +85,5 @@ Pkg.clone("git@github.com:Keno/VT100.jl.git")
 
 # Common Troubles
 
-- `unable to connect` on Linux: Make sure ptrace protection is disabled. You can do this manually by running `echo 0 > /proc/sys/kernel/yama/ptrace_scope`
+- `unable to connect` on Linux: Make sure ptrace protection is disabled. You can do this manually by running `echo 0 > /proc/sys/kernel/yama/ptrace_scope` Make sure that you are connecting to a valid PID of a running Julia process (see `ARGS` setting above).
 
