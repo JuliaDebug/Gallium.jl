@@ -11,3 +11,11 @@ open(`osascript`,"w") do p
      """)
 end
 end
+
+"""
+If a debugger is present, stop execution at this point.
+If a debugger, is not present proceed as usual.
+"""
+breakpoint() = try
+    ccall(:jl_raise_debugger, Int, ())
+end
