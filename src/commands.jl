@@ -149,6 +149,7 @@ function initialize_commands(CI)
       frame = first(thread)
       icxx"""
         lldb::ThreadPlanSP new_plan_sp (new ThreadPlanStepJulia (*$thread,
+              $(contains(bytestring(input),"-i")),
               $frame->GetSymbolContext(lldb::eSymbolContextEverything).line_entry.range,
               $frame->GetSymbolContext(lldb::eSymbolContextEverything),
               lldb::eOnlyThisThread));

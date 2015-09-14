@@ -4,12 +4,15 @@ private:
     lldb_private::StackID   m_jl_apply_id;
     lldb_private::StackID   m_jl_apply_parent_id;
     bool                    m_stepping_through_jl_apply;
+    bool                    m_avoid_base;
 public:
     ThreadPlanStepJulia(lldb_private::Thread &thread,
+                       bool avoid_base,
                        const lldb_private::AddressRange &range,
                        const lldb_private::SymbolContext &addr_context,
                        lldb::RunMode stop_others) :
-        ThreadPlanStepInRange(thread,range,addr_context,stop_others,lldb_private::eLazyBoolYes,lldb_private::eLazyBoolYes)
+        ThreadPlanStepInRange(thread,range,addr_context,stop_others,lldb_private::eLazyBoolYes,lldb_private::eLazyBoolYes),
+        m_avoid_base(avoid_base)
     {
         SetCallbacks();
         SetBreakpoint();
@@ -17,6 +20,22 @@ public:
 
     ~ThreadPlanStepJulia() {
         m_thread.CalculateTarget()->RemoveBreakpointByID(m_break->GetID());
+    }
+
+    bool
+    FrameMatchesJuliaAvoidCriteria ()
+    {
+        if (m_avoid_base) {
+            lldb_private::StackFrame *frame = GetThread().GetStackFrameAtIndex(0).get();
+            auto sc = frame->GetSymbolContext (lldb::eSymbolContextLineEntry);
+            if (sc.line_entry.file) {
+                // TODO come up with a better critereon for whether something is in
+                // base
+                if (strstr(sc.line_entry.file.GetCString(),"base") != NULL)
+                    return true;
+            }
+        }
+        return false;
     }
 
     static bool ShouldStopHere (lldb_private::ThreadPlan *current_plan,
@@ -32,12 +51,14 @@ public:
         if (!cu)
             return false;
         auto symb = sc.symbol;
-        return (
+        bool should_stop = (
             (cu->GetLanguage() == lldb::eLanguageTypeJulia) /*||
             (symb->GetName() == lldb_private::ConstString("jl_apply")) ||
             (symb->GetName() == lldb_private::ConstString("jl_apply_generic"))
             */
         );
+        should_stop &= !((ThreadPlanStepJulia*)current_plan)->FrameMatchesJuliaAvoidCriteria();
+        return should_stop;
     }
 
     bool AtOurBreakpoint() {
