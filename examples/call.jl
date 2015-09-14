@@ -21,6 +21,7 @@ lldb_exec(dbg,"process attach --pid $(ARGS[1])")
 lldb_exec(dbg,"thread select 1")
 lldb_exec(dbg,"settings append target.source-map . $(joinpath(JULIA_HOME,"../../base"))")
 lldb_exec(dbg,"settings set target.process.optimization-warnings false")
+lldb_exec(dbg,"b jl_throw")
 
 #=
 C = Cxx.instance(Gallium.TargetClang)
