@@ -1,16 +1,30 @@
-function gallium()
-open(`osascript`,"w") do p
-     write(p,"""
-     tell application "System Events"
-         set appWasRunning to exists (processes where name is "iTerm")
+function run_in_terminal(cmd::AbstractString)
+    if OS_NAME == :Darwin
+        open(`osascript`, "w") do p
+            write(p, """
+            tell application "System Events" to set ProcessList to get name of every process
+            tell application "Terminal"
+              activate
+              do script ("exec $cmd")
+            end tell
+            """)
+        end
+    elseif isreadable("/etc/alternatives/x-terminal-emulator")
+        spawn(`/etc/alternatives/x-terminal-emulator -e $cmd`)
+    elseif OS_NAME == :Linux || OS_NAME == :FreeBSD
+        spawn(`xterm -e $cmd`)
+    else
+        error("could not find terminal emulator")
+    end
+end
 
-         tell application "iTerm"
-             set newWindow to (create window with default profile command "~/Projects/julia-testpatch/julia -q ~/.julia/Gallium/examples/launch.jl $(getpid())")
-         end tell
-     end tell
-     """)
+function gallium_cmd()
+    script = joinpath(Pkg.dir(), "Gallium", "examples", "launch.jl")
+    julia = joinpath(JULIA_HOME, "julia")
+    "$julia -q $script $(getpid())"
 end
-end
+
+gallium() = run_in_terminal(gallium_cmd())
 
 """
 If a debugger is present, stop execution at this point.
