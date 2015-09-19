@@ -8,9 +8,9 @@ if isdefined(Base,:active_repl)
   Gallium.createTargetREPL(dbg)
   Gallium.RunTargetREPL(dbg)
   # Step up Target C++ mode
-  Cxx.addHeaderDir(Gallium.TargetClang,joinpath(JULIA_HOME,"../../src"))
-  Cxx.addHeaderDir(Gallium.TargetClang,joinpath(JULIA_HOME,"../../src/support"))
-  Cxx.addHeaderDir(Gallium.TargetClang,joinpath(JULIA_HOME,"../../usr/include"))
+  Cxx.addHeaderDir(Gallium.TargetClang,joinpath(JULIA_HOME,"../../src"); kind = C_System)
+  Cxx.addHeaderDir(Gallium.TargetClang,joinpath(JULIA_HOME,"../../src/support"); kind = C_System)
+  Cxx.addHeaderDir(Gallium.TargetClang,joinpath(JULIA_HOME,"../../usr/include"); kind = C_System)
   cxxparse(Gallium.TargetClang,"""#include "julia.h" """)
   # Do this after julia.h
   Cxx.register_booth(Gallium.TargetClang)
@@ -22,13 +22,3 @@ lldb_exec(dbg,"thread select 1")
 lldb_exec(dbg,"settings append target.source-map . $(joinpath(JULIA_HOME,"../../base"))")
 lldb_exec(dbg,"settings set target.process.optimization-warnings false")
 lldb_exec(dbg,"b jl_throw")
-
-#=
-C = Cxx.instance(Gallium.TargetClang)
-rt = Cxx.cpptype(C,Void)
-ectx = Gallium.ctx(dbg)
-faddr = Gallium.getFunctionCallAddress(dbg,
-  Gallium.lookup_function(dbg,"jl_eval_string"))
-arguments = ["println(\"Hello World\")"]
-Gallium.CreateCallFunctionPlan(C, rt, ectx, faddr, arguments)
-=#

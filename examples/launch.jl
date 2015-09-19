@@ -10,8 +10,8 @@ atreplinit() do args...
       repl.mi.interface = Base.REPL.setup_interface(repl)
   end
   include("call.jl")
-  empty!(ARGS)
+  empty!(Core.ARGS)
 end
-empty!(ARGS)
+empty!(Core.ARGS)
 Base._start()
 exit()

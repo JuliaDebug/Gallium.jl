@@ -56,10 +56,10 @@ function callFunction(dbg, name, argnames)
 end
 
 function call( ::Type{TargetValue},
-              VO::Union(pcpp"lldb_private::ValueObject",
+              VO::Union{pcpp"lldb_private::ValueObject",
                         vcpp"lldb_private::ValueObject",
                         pcpp"lldb_private::ValueObjectVariable",
-                        vcpp"lldb_private::ValueObjectVariable"))
+                        vcpp"lldb_private::ValueObjectVariable"})
     JV = ValueObjectToJulia(VO)
 end
 function call( ::Type{TargetValue}, JV)

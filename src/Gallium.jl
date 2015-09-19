@@ -217,10 +217,10 @@ function retrieveData(vo,jt)
     data[1]
 end
 
-ValueObjectToJulia(vo::Union(vcpp"lldb_private::ValueObject",vcpp"lldb_private::ValueObjectVariable")) =
+ValueObjectToJulia(vo::Union{vcpp"lldb_private::ValueObject",vcpp"lldb_private::ValueObjectVariable"}) =
     ValueObjectToJulia(icxx"&$vo;")
-function ValueObjectToJulia(vo::Union(pcpp"lldb_private::ValueObject",
-                        pcpp"lldb_private::ValueObjectVariable"))
+function ValueObjectToJulia(vo::Union{pcpp"lldb_private::ValueObject",
+                        pcpp"lldb_private::ValueObjectVariable"})
     @assert vo != C_NULL
     if icxx"$vo->GetError().Fail();"
         error(bytestring(icxx"$vo->GetError().AsCString();"))
@@ -319,8 +319,8 @@ function bytestring(s::vcpp"lldb_private::StreamString")
     bytestring(icxx"$s.GetData();",icxx"$s.GetSize();")
 end
 
-function bytestring(s::Union(vcpp"lldb_private::ConstString",
-                             rcpp"lldb_private::ConstString"))
+function bytestring(s::Union{vcpp"lldb_private::ConstString",
+                             rcpp"lldb_private::ConstString"})
     bytestring(icxx"$s.GetCString();",icxx"$s.GetLength();")
 end
 
