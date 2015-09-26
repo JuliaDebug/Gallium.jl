@@ -49,19 +49,24 @@ function createTargetREPL(dbg)
 
 end
 
-function entrypoint_for_julia_expression(target,names, expression)
-new_expr = """
-cfunction((@eval function (\$(gensym()))($(join(names,",")))\n
-    $(join([string(n," = unsafe_pointer_to_objref(",n,")") for n in names],'\n'))
-    $expression
-  end),
-  Any,Tuple{$(join(["Ptr{Void}" for i = 1:length(names)],','))})
-"""
+function entrypoint_for_julia_expression(target, names, expression, types = ["Any" for _ = 1:length(names)])
+targetexpression = IOBuffer()
+write(targetexpression,"cfunction((@eval function (\$(gensym()))($(join(names,",")))\n")
+for (name,T) in zip(names,types)
+    if T == "Any"
+        write(targetexpression, "$name = unsafe_pointer_to_objref($name)\n")
+    end
+end
+write(targetexpression,expression)
+write(targetexpression,"end),Any,Tuple{")
+write(targetexpression,join([T == "Any" ? "Ptr{Void}" : T for T in types],','))
+write(targetexpression,"})")
+new_expr = takebuf_string(targetexpression)
 ptr = Gallium.target_call(target,:jl_eval_string,[string(new_expr,'\0')])
 ptr = Gallium.target_call(target,:jl_unbox_voidpointer,[ptr])
 end
 
-function call_prepared_entrypoint(target, ectx, entrypoint, args::Vector{Ptr{Void}})
+function call_prepared_entrypoint(target, ectx, entrypoint, args)
     C = Cxx.instance(Gallium.TargetClang)
     RT = Cxx.cpptype(C,pcpp"_jl_value_t")
     Gallium.CreateCallFunctionPlan(C, RT, ectx, convert(UInt64,entrypoint),

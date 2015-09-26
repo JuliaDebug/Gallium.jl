@@ -114,6 +114,10 @@ function initialize_commands(CI)
       vals = map(x->try; ValueObjectToJulia(icxx"$x.get();"); catch; nothing; end,
         map(var->icxx"$frame->GetValueObjectForFrameVariable($var,lldb::eNoDynamicValues);",vars))
       names = map(var->bytestring(icxx"$var->GetName();"),vars)
+      typenames = map(vars) do var
+          name = bytestring(icxx"$var->GetType()->GetName();")
+          name == "jl_value_t *" ? "Any" : name
+      end
       validxs = find(x->x!==nothing,vals)
       otheridxs = collect(filter(x->!(x in validxs),1:length(names)))
 
@@ -131,9 +135,8 @@ function initialize_commands(CI)
       end
       end
       """
-      f = Gallium.entrypoint_for_julia_expression(dbg, names[validxs], expression)
-      val = Gallium.call_prepared_entrypoint(dbg, icxx"*$ctx;", f,
-        Ptr{Void}[convert(Ptr{Void},v.ref) for v in vals[validxs]])
+      f = Gallium.entrypoint_for_julia_expression(dbg, names[validxs], expression, typenames[validxs])
+      val = Gallium.call_prepared_entrypoint(dbg, icxx"*$ctx;", f, vals[validxs])
       Base.Text(retrieve_repr(dbg,icxx"*$ctx;",val))
     end
     AddCommand(CI,"jobj") do ctx, input, result
