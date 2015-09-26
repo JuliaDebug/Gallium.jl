@@ -109,6 +109,9 @@ function initialize_commands(CI)
     AddCommand(CI,"jp") do ctx, input, result
       input = bytestring(input)
       frame = Gallium.current_frame(ctx)
+      if icxx"!$frame;"
+          error("Could not get current frame (no frame selected or target running?)")
+      end
       vars = icxx"$frame->GetVariableList(false);"
       target = icxx"$frame->CalculateTarget();"
       vals = map(x->try; ValueObjectToJulia(icxx"$x.get();"); catch; nothing; end,
