@@ -2,17 +2,18 @@ using Gallium
 import Base: LineEdit, REPL
 
 function RunLLDBRepl(dbg)
-    # Setup cxx panel
-    panel = LineEdit.Prompt("LLDB > ";
-        # Copy colors from the prompt object
-        prompt_prefix=Base.text_colors[:blue],
-        prompt_suffix=Base.text_colors[:white],
-        on_enter = s->true)
-
     repl = Base.active_repl
     mirepl = isdefined(repl,:mi) ? repl.mi : repl
 
     main_mode = mirepl.interface.modes[1]
+
+    # Setup cxx panel
+    panel = LineEdit.Prompt("LLDB > ";
+        # Copy colors from the prompt object
+        prompt_prefix=Base.text_colors[:blue],
+        prompt_suffix=main_mode.prompt_suffix,
+        on_enter = s->true)
+
     hp = main_mode.hist
     hp.mode_mapping[:lldb] = panel
     panel.hist = hp
