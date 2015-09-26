@@ -101,13 +101,13 @@ function debugger()
         line = strip(readline(readableend),'\n')
         w = Base.LineEdit.width(term)
         ns = div(max(0,strwidth(line)-1),w)+1
-        print(STDOUT,string("$(CSI)s",
+        print(STDOUT,string(#= "$(CSI)s" =# "\e7",
                             "$(CSI)",ns,"A",
                             "$(CSI)",ns,"S",
                             "$(CSI)",ns,"L",
                             "$(CSI)1G",
                             line,
-                            "$(CSI)u"))
+                            #= "$(CSI)u" =# "\e8"))
     end
     initialize_commands(GetCommandInterpreter(dbg))
     dbg
