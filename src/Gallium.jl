@@ -9,6 +9,8 @@ using TerminalUI
 
 # General LLVM Headers
 include(Pkg.dir("Cxx","test","llvmincludes.jl"))
+addHeaderDir(Cxx.__default_compiler__,joinpath(Cxx.depspath,"llvm-svn","tools","lldb","source"))
+addHeaderDir(Cxx.__default_compiler__,joinpath(Cxx.depspath,"llvm-svn","tools","lldb","include"))
 
 # LLDB Headers
 cxx"""
@@ -43,7 +45,6 @@ cxx"""
 #include "lldb/Symbol/ClangASTContext.h"
 #include "lldb/Core/ValueObject.h"
 #include "lldb/Core/ValueObjectVariable.h"
-#include "lldb/Expression/ClangModulesDeclVendor.h"
 #include "lldb/Expression/IRExecutionUnit.h"
 #include "llvm/AsmParser/Parser.h"
 static llvm::ManagedStatic<lldb_private::SystemLifetimeManager> g_debugger_lifetime;
@@ -136,6 +137,7 @@ function _lldb_list(T,GetSize)
         end
         Base.endof(l::$T) = length(l)
 
+        Base.isempty(l::$T) = length(l) == 0
         Base.start(l::$T) = 0
         Base.prevind(l::$T,i::Int) = i-1
         Base.next(l::$T,i) = (l[i],i+1)
@@ -281,6 +283,13 @@ function Base.show(reg::cpcpp"lldb_private::RegisterInfo")
     println(")")
 end
 
+function JumpToLine(thread,file,line)
+    icxx"""
+        lldb_private::FileSpec filespec($(pointer(file)),false);
+        $thread->JumpToLine(filespec, $line, false, nullptr);
+    """
+end
+
 # Breakpoints
 function SetCallback(bc,func)
     icxx"""
@@ -297,7 +306,7 @@ function SetBreakpointAtLoc(func,target,file,line)
     bc = icxx"""
     lldb_private::FileSpecList A;
     lldb_private::FileSpec filespec($(pointer(file)),false);
-    $target->CreateBreakpoint(&A,filespec,$line,lldb_private::eLazyBoolCalculate,lldb_private::eLazyBoolYes,false,false).get();
+    $target->CreateBreakpoint(&A,filespec,$line,lldb_private::eLazyBoolCalculate,lldb_private::eLazyBoolYes,false,false,lldb_private::eLazyBoolYes).get();
     """
     SetCallback(bc,func)
     bc
@@ -306,7 +315,7 @@ end
 function SetBreakpoint(func,target,point)
     bc = icxx"""
     lldb_private::FileSpecList A,B;
-    $target->CreateBreakpoint(&A,&B,$(pointer(point)),lldb::eFunctionNameTypeAuto,lldb_private::eLazyBoolYes,false,false).get();
+    $target->CreateBreakpoint(&A,&B,$(pointer(point)),lldb::eFunctionNameTypeAuto,lldb_private::eLazyBoolYes,false,false,lldb_private::eLazyBoolYes).get();
     """
     SetCallback(bc,func)
     bc
@@ -323,10 +332,6 @@ end
 function bytestring(s::Union{vcpp"lldb_private::ConstString",
                              rcpp"lldb_private::ConstString"})
     bytestring(icxx"$s.GetCString();",icxx"$s.GetLength();")
-end
-
-function bytestring(s::vcpp"llvm::StringRef")
-    bytestring(icxx"$s.data();",icxx"$s.size();")
 end
 
 function dump(SF::pcpp"lldb_private::StackFrame")
@@ -432,6 +437,8 @@ end
 
 const DW_LANG_JULIA = 31
 function isJuliaModule(M::pcpp"lldb_private::Module")
+    M == C_NULL && return false
+    isempty(M) && return false
     icxx"$(first(M))->GetLanguage();" == DW_LANG_JULIA
 end
 isJuliaModule(M::ModuleSP) = isJuliaModule(icxx"$M.get();")
