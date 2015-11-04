@@ -44,12 +44,17 @@ julia> collect(DWARF.DIETrees(ObjFileBase.debugsections(oh)))
 ```
 
 # Building Gallium
+
 Gallium requires custom versions of julia, LLVM, Clang, LLDB and libuv. The easiest way to obtain these
 is to checkout the kf/gallium branch of julia, which will attempt to check out the correct branches and
-build everything from scratch. Note that this only works on a fresh install. If you already have a version
-of llvm-svn checked out you will manually needs to go in and check out the kf/gallium branch on from
-JuliaLang/{llvm, clang, lldb}. After the julia build succeeds, you may need to apply the following patch
-to Cxx.jl:
+build everything from scratch. Note that this only works on a fresh install.
+
+Alternatively, if you already have a version of llvm-svn checked out, you can manually go in and
+check out the kf/gallium branch on JuliaLang/{llvm, clang, lldb} and rebuild each of them.
+
+After one of these two methods of building Julia with support for Gallium suceeds, you may need to apply
+the following patch to Cxx.jl:
+
 ```
 diff --git a/src/bootstrap.cpp b/src/bootstrap.cpp
 index 01ff792..8dca780 100644
