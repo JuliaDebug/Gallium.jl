@@ -2,7 +2,7 @@
     sin(sin(x))
 end
 
-function inaloop(y)
+@noinline function inaloop(y)
     for i = 1:y
 	sinthesin(i)
     end

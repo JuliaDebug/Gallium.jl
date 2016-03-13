@@ -45,6 +45,8 @@ module Gallium
         end
     end
 
+    ASTInterpreter._evaluated!(x::NativeStack, y) = nothing
+
     export breakpoint
 
     function breakpoint_hit(hook, RC)
@@ -84,7 +86,9 @@ module Gallium
                 [:($(quot(x)) => $x) for x in argnames]...)),
                 Dict{Symbol,Any}()),
                 NativeStack($stack); loctree = loctree, code = code)),
-            :(ASTInterpreter.RunDebugREPL(interp))))
+            :(ASTInterpreter.RunDebugREPL(interp)),
+            :(ASTInterpreter.finish!(interp)),
+            :(return interp.retval::$(linfo.rettype))))
         f = eval(thunk)
         faddr = Hooking.get_function_addr(f, Tuple{spectypes...})
         Hooking.Deopt(faddr)
