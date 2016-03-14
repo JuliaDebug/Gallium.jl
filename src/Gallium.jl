@@ -10,6 +10,7 @@ module Gallium
 
     immutable JuliaStackFrame
         linfo::LambdaInfo
+        variables::Dict
         locals::Dict
     end
     
@@ -25,18 +26,17 @@ module Gallium
         linfo = x.linfo
         ASTInterpreter.print_linfo_desc(STDOUT, linfo)
         argnames = Base.uncompressed_ast(linfo).args[1][2:end]
-        for name in argnames
-            print("- ",name," = ")
-            if haskey(x.locals, name)
-                if x.locals[name] == 0x0
-                    println("<found in DWARF but unavailable>")
+        ASTInterpreter.print_locals(STDOUT, x.locals, (io,name)->begin
+            if haskey(x.variables, name)
+                if x.variables[name] == 0x0
+                    println(io, "<found in DWARF but unavailable>")
                 else
-                    println("<available>")
+                    println(io, "<available>")
                 end
             else
-                println("<not found in DWARF>")
+                println(io, "<not found in DWARF>")
             end
-        end
+        end)
     end
 
     function ASTInterpreter.print_backtrace(x::NativeStack)
@@ -54,7 +54,8 @@ module Gallium
         Hooking.rec_backtrace(RC) do cursor
             ip = reinterpret(Ptr{Void},Hooking.get_ip(cursor))
             ipinfo = (ccall(:jl_lookup_code_address, Any, (Ptr{Void}, Cint),
-              ip, 0))
+              ip-1, 0))
+            @show ipinfo
             fromC = ipinfo[7]
             if fromC
                 push!(stack, CStackFrame(Hooking.get_ip(cursor)))
@@ -69,8 +70,38 @@ module Gallium
                 @show s
                 SP = DIDebug.process_SP(s.tree.children[1], s.strtab)
                 @show SP
+                locals = ASTInterpreter.prepare_locals(ipinfo[6])
+                @show ipinfo[6]
+                vartypes = Dict{Symbol,Type}()
+                tlinfo = ipinfo[6]
+                for x in Base.uncompressed_ast(tlinfo).args[2][1]
+                    vartypes[x[1]] = isa(x[2],Symbol) ? tlinfo.module.(x[2]) : x[2]
+                end
+                for (k,v) in SP.variables
+                    if isa(v, DWARF.Attributes.ExprLocAttribute)
+                        opcodes = v.content
+                        sm = DWARF.Expressions.StateMachine{UInt64}()
+                        function getreg(reg)
+                            if reg == DWARF.DW_OP_fbreg
+                                Hooking.get_reg(cursor, SP.fbreg)
+                            else
+                                Hooking.get_reg(cursor, reg)
+                            end
+                        end
+                        getword(addr) = unsafe_load(reinterpret(Ptr{UInt64}, addr))
+                        addr_func(x) = x
+                        val = DWARF.Expressions.evaluate_simple_location(
+                            sm, opcodes, getreg, getword, addr_func, :NativeEndian)
+                        if isa(val, DWARF.Expressions.MemoryLocation)
+                            val = unsafe_load(reinterpret(Ptr{vartypes[k]},
+                                val.i))
+                        end
+                        locals[k] = val
+                    end
+                end
+                # process SP.variables here
                 #h = readmeta(IOBuffer(data))
-                push!(stack, JuliaStackFrame(ipinfo[6], SP.variables))
+                push!(stack, JuliaStackFrame(ipinfo[6], SP.variables, locals))
             end
         end
         reverse!(stack)
