@@ -13,7 +13,7 @@ module Gallium
         variables::Dict
         locals::Dict
     end
-    
+
     immutable CStackFrame
         ip::Ptr{Void}
     end
@@ -22,11 +22,12 @@ module Gallium
         stack
     end
 
-    function ASTInterpreter.print_backtrace(x::JuliaStackFrame)
+    function ASTInterpreter.print_frame(io, num, x::JuliaStackFrame)
+        print(io, "[$num] ")
         linfo = x.linfo
-        ASTInterpreter.print_linfo_desc(STDOUT, linfo)
+        ASTInterpreter.print_linfo_desc(io, linfo)
         argnames = Base.uncompressed_ast(linfo).args[1][2:end]
-        ASTInterpreter.print_locals(STDOUT, x.locals, (io,name)->begin
+        ASTInterpreter.print_locals(io, x.locals, (io,name)->begin
             if haskey(x.variables, name)
                 if x.variables[name] == 0x0
                     println(io, "<found in DWARF but unavailable>")
@@ -39,11 +40,14 @@ module Gallium
         end)
     end
 
-    function ASTInterpreter.print_backtrace(x::NativeStack)
-        for s in reverse(x.stack)
-            isa(s, JuliaStackFrame) && ASTInterpreter.print_backtrace(s)
-        end
+    function ASTInterpreter.print_status(x::JuliaStackFrame; kwargs...)
+        println("<Source information not yet available for native frames>")
     end
+
+    function ASTInterpreter.get_env_for_eval(x::JuliaStackFrame)
+        ASTInterpreter.Environment(copy(x.locals), Dict{Symbol, Any}())
+    end
+    ASTInterpreter.get_linfo(x::JuliaStackFrame) = x.linfo
 
     ASTInterpreter._evaluated!(x::NativeStack, y) = nothing
 
@@ -116,7 +120,8 @@ module Gallium
                 $(Expr(:call,:Dict,
                 [:($(quot(x)) => $x) for x in argnames]...)),
                 Dict{Symbol,Any}()),
-                NativeStack($stack); loctree = loctree, code = code)),
+                $(collect(filter(x->!isa(x,CStackFrame),stack)));
+                    loctree = loctree, code = code)),
             :(ASTInterpreter.RunDebugREPL(interp)),
             :(ASTInterpreter.finish!(interp)),
             :(return interp.retval::$(linfo.rettype))))
