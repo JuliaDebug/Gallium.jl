@@ -15,6 +15,7 @@ Pkg.clone("https://github.com/Keno/MachO.jl.git")
 Pkg.clone("https://github.com/Keno/ELF.jl.git")
 Pkg.clone("https://github.com/Keno/AbstractTrees.jl.git")
 Pkg.clone("https://github.com/Keno/VT100.jl.git")
+Pkg.clone("https://github.com/Keno/Hooking.jl.git")
 # This is copied from the ASTInterpreter repository
 Pkg.add("JuliaParser")
 Pkg.checkout("JuliaParser", "kf/loctrack") # If this complains, try Pkg.checkout("JuliaParser") first
