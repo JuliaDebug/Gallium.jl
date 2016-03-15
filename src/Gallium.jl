@@ -6,9 +6,11 @@ module Gallium
     using DWARF
     using ObjFileBase
     using ELF
+    using MachO
     using DIDebug
 
     immutable JuliaStackFrame
+        oh
         linfo::LambdaInfo
         variables::Dict
         locals::Dict
@@ -49,9 +51,20 @@ module Gallium
     end
     ASTInterpreter.get_linfo(x::JuliaStackFrame) = x.linfo
 
-    ASTInterpreter._evaluated!(x::NativeStack, y) = nothing
+    # Use this hook to expose extra functionality
+    function ASTInterpreter.unknown_command(x::JuliaStackFrame, command)
+        if command == "handle"
+            eval(Main,:(h = $(x.oh)))
+            error()
+        end
+    end
 
     export breakpoint
+
+    # Move this somewhere better
+    function ObjFileBase.getSectionLoadAddress(LOI::Dict, sec)
+        return LOI[symbol(bytestring(deref(sec).sectname))]
+    end
 
     function breakpoint_hit(hook, RC)
         stack = Any[]
@@ -59,7 +72,6 @@ module Gallium
             ip = reinterpret(Ptr{Void},Hooking.get_ip(cursor))
             ipinfo = (ccall(:jl_lookup_code_address, Any, (Ptr{Void}, Cint),
               ip-1, 0))
-            @show ipinfo
             fromC = ipinfo[7]
             if fromC
                 push!(stack, CStackFrame(Hooking.get_ip(cursor)))
@@ -67,45 +79,57 @@ module Gallium
                 data = copy(ccall(:jl_get_dobj_data, Any, (Ptr{Void},), ip))
                 buf = IOBuffer(data, true, true)
                 h = readmeta(buf)
-                ELF.relocate!(buf, h)
-                dbgs = debugsections(h)
-                @show ipinfo[1]
-                s = DWARF.finddietreebyname(dbgs, string(ipinfo[1]))
-                @show s
-                SP = DIDebug.process_SP(s.tree.children[1], s.strtab)
-                @show SP
                 locals = ASTInterpreter.prepare_locals(ipinfo[6])
-                @show ipinfo[6]
-                vartypes = Dict{Symbol,Type}()
-                tlinfo = ipinfo[6]
-                for x in Base.uncompressed_ast(tlinfo).args[2][1]
-                    vartypes[x[1]] = isa(x[2],Symbol) ? tlinfo.module.(x[2]) : x[2]
-                end
-                for (k,v) in SP.variables
-                    if isa(v, DWARF.Attributes.ExprLocAttribute)
-                        opcodes = v.content
-                        sm = DWARF.Expressions.StateMachine{UInt64}()
-                        function getreg(reg)
-                            if reg == DWARF.DW_OP_fbreg
-                                Hooking.get_reg(cursor, SP.fbreg)
-                            else
-                                Hooking.get_reg(cursor, reg)
-                            end
-                        end
-                        getword(addr) = unsafe_load(reinterpret(Ptr{UInt64}, addr))
-                        addr_func(x) = x
-                        val = DWARF.Expressions.evaluate_simple_location(
-                            sm, opcodes, getreg, getword, addr_func, :NativeEndian)
-                        if isa(val, DWARF.Expressions.MemoryLocation)
-                            val = unsafe_load(reinterpret(Ptr{vartypes[k]},
-                                val.i))
-                        end
-                        locals[k] = val
+                local variables
+                try
+                    if isa(h, ELF.ELFHandle)
+                        ELF.relocate!(buf, h)
+                    else
+                        sstart = ccall(:jl_get_section_start, UInt64, (Ptr{Void},), ip-1)
+                        LOI = Dict(:__text => sstart,
+                            :__debug_str=>0) #This one really shouldn't be necessary
+                        MachO.relocate!(buf, h; LOI=LOI)
                     end
+                    dbgs = debugsections(h)
+                    s = DWARF.finddietreebyname(dbgs, string(ipinfo[1]))
+                    strtab = ObjFileBase.load_strtab(dbgs.debug_str)
+                    SP = DIDebug.process_SP(isa(s, DWARF.DIETreeRef) ? s.tree.children[1] : s, strtab)
+                    vartypes = Dict{Symbol,Type}()
+                    tlinfo = ipinfo[6]
+                    for x in Base.uncompressed_ast(tlinfo).args[2][1]
+                        vartypes[x[1]] = isa(x[2],Symbol) ? tlinfo.module.(x[2]) : x[2]
+                    end
+                    for (k,v) in SP.variables
+                        if isa(v, DWARF.Attributes.ExprLocAttribute)
+                            opcodes = v.content
+                            sm = DWARF.Expressions.StateMachine{UInt64}()
+                            function getreg(reg)
+                                if reg == DWARF.DW_OP_fbreg
+                                    Hooking.get_reg(cursor, SP.fbreg)
+                                else
+                                    Hooking.get_reg(cursor, reg)
+                                end
+                            end
+                            getword(addr) = unsafe_load(reinterpret(Ptr{UInt64}, addr))
+                            addr_func(x) = x
+                            val = DWARF.Expressions.evaluate_simple_location(
+                                sm, opcodes, getreg, getword, addr_func, :NativeEndian)
+                            if isa(val, DWARF.Expressions.MemoryLocation)
+                                val = unsafe_load(reinterpret(Ptr{vartypes[k]},
+                                    val.i))
+                            end
+                            locals[k] = val
+                        end
+                    end
+                    variables = SP.variables
+                catch err
+                    @show err
+                    Base.show_backtrace(STDOUT, catch_backtrace())
+                    variables = Dict()
                 end
                 # process SP.variables here
                 #h = readmeta(IOBuffer(data))
-                push!(stack, JuliaStackFrame(ipinfo[6], SP.variables, locals))
+                push!(stack, JuliaStackFrame(h, ipinfo[6], variables, locals))
             end
         end
         reverse!(stack)
