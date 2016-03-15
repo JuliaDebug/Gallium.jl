@@ -76,7 +76,7 @@ Finally, you'll need to run the following series of commands at the julia prompt
 ```
 Pkg.clone("https://github.com/Keno/Cxx.jl.git")
 Pkg.build("Cxx")
-Pkg.add("Reactive")
+Pkg.clone("Reactive")
 Pkg.clone("https://github.com/Keno/JITTools.jl.git")
 Pkg.clone("https://github.com/Keno/DIDebug.jl.git")
 Pkg.clone("https://github.com/Keno/TerminalUI.jl.git")
