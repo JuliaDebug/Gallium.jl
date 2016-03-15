@@ -11,6 +11,8 @@ module Gallium
 
     immutable JuliaStackFrame
         oh
+        file
+        line::Int
         linfo::LambdaInfo
         variables::Dict
         locals::Dict
@@ -43,7 +45,8 @@ module Gallium
     end
 
     function ASTInterpreter.print_status(x::JuliaStackFrame; kwargs...)
-        println("<Source information not yet available for native frames>")
+        @show (x.file, x.line)
+        ASTInterpreter.print_sourcecode(x.linfo, readstring(x.file), x.line)
     end
 
     function ASTInterpreter.get_env_for_eval(x::JuliaStackFrame)
@@ -56,6 +59,29 @@ module Gallium
         if command == "handle"
             eval(Main,:(h = $(x.oh)))
             error()
+        elseif command == "sp"
+            dbgs = debugsections(x.oh)
+            s = DWARF.finddietreebyname(dbgs, string(x.linfo.name))
+            println(s)
+            return
+        elseif command == "cu"
+            dbgs = debugsections(x.oh)
+            s = DWARF.findcubyname(dbgs, string(x.linfo.name))
+            println(s)
+            return
+        elseif command == "linetabprog" || command == "linetab"
+            dbgs = debugsections(x.oh)
+            cu = DWARF.findcubyname(dbgs, string(x.linfo.name))
+            line_offset = 0
+            for at in DWARF.children(cu)
+                if DWARF.tag(at) == DWARF.DW_AT_stmt_list
+                    line_offset = convert(UInt, at)
+                end
+            end
+            seek(dbgs.debug_line, line_offset)
+            linetab = DWARF.LineTableSupport.LineTable(x.oh.io)
+            (command == "linetabprog" ? DWARF.LineTableSupport.dump_program :
+                DWARF.LineTableSupport.dump_table)(STDOUT, linetab)
         end
     end
 
@@ -64,6 +90,21 @@ module Gallium
     # Move this somewhere better
     function ObjFileBase.getSectionLoadAddress(LOI::Dict, sec)
         return LOI[symbol(bytestring(deref(sec).sectname))]
+    end
+
+    function search_linetab(linetab, ip)
+        local last_entry
+        first = true
+        for entry in linetab
+            if !first
+                if entry.address > reinterpret(UInt64,ip)
+                    return last_entry
+                end
+            end
+            first = false
+            last_entry = entry
+        end
+        last_entry
     end
 
     function breakpoint_hit(hook, RC)
@@ -80,7 +121,7 @@ module Gallium
                 buf = IOBuffer(data, true, true)
                 h = readmeta(buf)
                 locals = ASTInterpreter.prepare_locals(ipinfo[6])
-                local variables
+                local variables, line, file
                 try
                     if isa(h, ELF.ELFHandle)
                         ELF.relocate!(buf, h)
@@ -91,9 +132,29 @@ module Gallium
                         MachO.relocate!(buf, h; LOI=LOI)
                     end
                     dbgs = debugsections(h)
-                    s = DWARF.finddietreebyname(dbgs, string(ipinfo[1]))
+                    cu, sp = DWARF.findcuspbyname(dbgs, string(ipinfo[1]))
+                    # Process Compilation Unit to get line table
+                    line_offset = 0
+                    for at in DWARF.children(cu)
+                        if DWARF.tag(at) == DWARF.DW_AT_stmt_list
+                            line_offset = convert(UInt, at)
+                        end
+                    end
+                    seek(dbgs.debug_line, line_offset)
+                    linetab = DWARF.LineTableSupport.LineTable(h.io)
+                    entry = search_linetab(linetab, ip-1)
+                    line = entry.line
+                    fileentry = linetab.header.file_names[entry.file]
+                    if fileentry.dir_idx == 0
+                        file = Base.find_source_file(fileentry.name)
+                    else
+                        file = joinpath(linetab.header.include_directories[fileentry.dir_idx],
+                            fileentry.name)
+                    end
+
+                    # Process Subprogram to extract local variables
                     strtab = ObjFileBase.load_strtab(dbgs.debug_str)
-                    SP = DIDebug.process_SP(isa(s, DWARF.DIETreeRef) ? s.tree.children[1] : s, strtab)
+                    SP = DIDebug.process_SP(isa(sp, DWARF.DIETreeRef) ? sp.tree.children[1] : sp, strtab)
                     vartypes = Dict{Symbol,Type}()
                     tlinfo = ipinfo[6]
                     for x in Base.uncompressed_ast(tlinfo).args[2][1]
@@ -126,10 +187,12 @@ module Gallium
                     @show err
                     Base.show_backtrace(STDOUT, catch_backtrace())
                     variables = Dict()
+                    line = 0
+                    file = ""
                 end
                 # process SP.variables here
                 #h = readmeta(IOBuffer(data))
-                push!(stack, JuliaStackFrame(h, ipinfo[6], variables, locals))
+                push!(stack, JuliaStackFrame(h, file, line, ipinfo[6], variables, locals))
             end
         end
         reverse!(stack)
