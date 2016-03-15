@@ -8,6 +8,8 @@ module Gallium
     using ELF
     using MachO
     using DIDebug
+    import ASTInterpreter: @enter
+    export breakpoint, @enter
 
     immutable JuliaStackFrame
         oh
