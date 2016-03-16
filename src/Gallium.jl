@@ -205,10 +205,14 @@ module Gallium
         thunk = Expr(:->,Expr(:tuple,argnames...),Expr(:block,
             :(linfo = $linfo),
             :((loctree, code) = ASTInterpreter.reparse_meth(linfo)),
+            :(locals = ASTInterpreter.prepare_locals(linfo)),
+            :(for (k,v) in zip(linfo.sparam_syms, linfo.sparam_vals)
+                locals[k] = v
+            end),
+            :(merge!(locals,$(Expr(:call,:Dict,
+            [:($(quot(x)) => $x) for x in argnames]...)))),
             :(interp = ASTInterpreter.enter(linfo,ASTInterpreter.Environment(
-                $(Expr(:call,:Dict,
-                [:($(quot(x)) => $x) for x in argnames]...)),
-                Dict{Symbol,Any}()),
+                locals),
                 $(collect(filter(x->!isa(x,CStackFrame),stack)));
                     loctree = loctree, code = code)),
             :(ASTInterpreter.RunDebugREPL(interp)),
