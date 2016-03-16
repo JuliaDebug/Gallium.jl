@@ -14,6 +14,7 @@ module Gallium
     immutable JuliaStackFrame
         oh
         file
+        ip
         line::Int
         linfo::LambdaInfo
         variables::Dict
@@ -24,9 +25,12 @@ module Gallium
         ip::Ptr{Void}
     end
 
+    # Fake "Interpreter" that is just a native stack
     immutable NativeStack
         stack
     end
+
+    ASTInterpreter.done!(stack::NativeStack) = nothing
 
     function ASTInterpreter.print_frame(io, num, x::JuliaStackFrame)
         print(io, "[$num] ")
@@ -48,7 +52,15 @@ module Gallium
 
     function ASTInterpreter.print_status(x::JuliaStackFrame; kwargs...)
         @show (x.file, x.line)
-        ASTInterpreter.print_sourcecode(x.linfo, readstring(x.file), x.line)
+        if x.line < 0
+            println("Got a negative line number. Bug?")
+        else
+            ASTInterpreter.print_sourcecode(x.linfo, readstring(x.file), x.line)
+        end
+    end
+
+    function ASTInterpreter.print_status(x::NativeStack; kwargs...)
+        ASTInterpreter.print_status(x.stack[end]; kwargs...)
     end
 
     function ASTInterpreter.get_env_for_eval(x::JuliaStackFrame)
@@ -71,6 +83,9 @@ module Gallium
             s = DWARF.findcubyname(dbgs, string(x.linfo.name))
             println(s)
             return
+        elseif command == "ip"
+            println(x.ip)
+            return
         elseif command == "linetabprog" || command == "linetab"
             dbgs = debugsections(x.oh)
             cu = DWARF.findcubyname(dbgs, string(x.linfo.name))
@@ -86,6 +101,11 @@ module Gallium
                 DWARF.LineTableSupport.dump_table)(STDOUT, linetab)
         end
     end
+
+    function ASTInterpreter.unknown_command(x::NativeStack, command)
+        ASTInterpreter.unknown_command(x.stack[end], command)
+    end
+
 
     export breakpoint
 
@@ -109,7 +129,7 @@ module Gallium
         last_entry
     end
 
-    function breakpoint_hit(hook, RC)
+    function stackwalk(RC)
         stack = Any[]
         Hooking.rec_backtrace(RC) do cursor
             ip = reinterpret(Ptr{Void},Hooking.get_ip(cursor))
@@ -125,10 +145,10 @@ module Gallium
                 locals = ASTInterpreter.prepare_locals(ipinfo[6])
                 local variables, line, file
                 try
+                    sstart = ccall(:jl_get_section_start, UInt64, (Ptr{Void},), ip-1)
                     if isa(h, ELF.ELFHandle)
                         ELF.relocate!(buf, h)
                     else
-                        sstart = ccall(:jl_get_section_start, UInt64, (Ptr{Void},), ip-1)
                         LOI = Dict(:__text => sstart,
                             :__debug_str=>0) #This one really shouldn't be necessary
                         MachO.relocate!(buf, h; LOI=LOI)
@@ -144,7 +164,7 @@ module Gallium
                     end
                     seek(dbgs.debug_line, line_offset)
                     linetab = DWARF.LineTableSupport.LineTable(h.io)
-                    entry = search_linetab(linetab, ip-1)
+                    entry = search_linetab(linetab, ip-sstart-1)
                     line = entry.line
                     fileentry = linetab.header.file_names[entry.file]
                     if fileentry.dir_idx == 0
@@ -194,10 +214,14 @@ module Gallium
                 end
                 # process SP.variables here
                 #h = readmeta(IOBuffer(data))
-                push!(stack, JuliaStackFrame(h, file, line, ipinfo[6], variables, locals))
+                push!(stack, JuliaStackFrame(h, file, ip, line, ipinfo[6], variables, locals))
             end
         end
         reverse!(stack)
+    end
+
+    function breakpoint_hit(hook, RC)
+        stack = stackwalk(RC)
         stacktop = pop!(stack)
         linfo = stacktop.linfo
         argnames = Base.uncompressed_ast(linfo).args[1][2:end]
@@ -233,6 +257,16 @@ module Gallium
 
     macro breakpoint(ex0)
         Base.gen_call_with_extracted_types(:(Gallium.breakpoint),ex0)
+    end
+
+    # For now this is a very simple implementation. A better implementation
+    # would trap and reuse logic. That will become important once we actually
+    # support optimized code to avoid cloberring registers. For now do the dead
+    # simple, stupid thing.
+    function breakpoint()
+        RC = Hooking.RegisterContext()
+        ccall(:jl_unw_getcontext,Cint,(Ptr{Void},),RC.data)
+        ASTInterpreter.RunDebugREPL(NativeStack(filter(x->isa(x,JuliaStackFrame),stackwalk(RC)[1:end-1])))
     end
 
 end
