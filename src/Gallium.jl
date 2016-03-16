@@ -9,7 +9,7 @@ module Gallium
     using MachO
     using DIDebug
     import ASTInterpreter: @enter
-    export breakpoint, @enter
+    export breakpoint, @enter, @breakpoint
 
     immutable JuliaStackFrame
         oh
@@ -229,6 +229,10 @@ module Gallium
 
     function breakpoint(func, args)
         Hooking.hook(breakpoint_hit, func, args)
+    end
+
+    macro breakpoint(ex0)
+        Base.gen_call_with_extracted_types(:(Gallium.breakpoint),ex0)
     end
 
 end
