@@ -8,6 +8,7 @@ module Gallium
     using ELF
     using MachO
     using DIDebug
+    using AbstractTrees
     import ASTInterpreter: @enter
     export breakpoint, @enter, @breakpoint
 
@@ -15,6 +16,7 @@ module Gallium
         oh
         file
         ip
+        sstart
         line::Int
         linfo::LambdaInfo
         variables::Dict
@@ -75,13 +77,14 @@ module Gallium
             error()
         elseif command == "sp"
             dbgs = debugsections(x.oh)
-            s = DWARF.finddietreebyname(dbgs, string(x.linfo.name))
-            println(s)
+            cu = DWARF.searchcuforip(dbgs, UInt(x.ip)-x.sstart-1)
+            sp = DWARF.searchspforip(cu, UInt(x.ip)-x.sstart-1)
+            AbstractTrees.print_tree(show, STDOUT, sp)
             return
         elseif command == "cu"
             dbgs = debugsections(x.oh)
-            s = DWARF.findcubyname(dbgs, string(x.linfo.name))
-            println(s)
+            cu = DWARF.searchcuforip(dbgs, UInt(x.ip)-x.sstart-1)
+            AbstractTrees.print_tree(show, STDOUT, cu)
             return
         elseif command == "ip"
             println(x.ip)
@@ -143,7 +146,7 @@ module Gallium
                 buf = IOBuffer(data, true, true)
                 h = readmeta(buf)
                 locals = ASTInterpreter.prepare_locals(ipinfo[6])
-                local variables, line, file
+                local variables, line, file, sstart
                 try
                     sstart = ccall(:jl_get_section_start, UInt64, (Ptr{Void},), ip-1)
                     if isa(h, ELF.ELFHandle)
@@ -154,14 +157,10 @@ module Gallium
                         MachO.relocate!(buf, h; LOI=LOI)
                     end
                     dbgs = debugsections(h)
-                    cu, sp = DWARF.findcuspbyname(dbgs, string(ipinfo[1]))
+                    cu = DWARF.searchcuforip(dbgs, UInt(ip)-sstart-1)
+                    sp = DWARF.searchspforip(cu, UInt(ip)-sstart-1)
                     # Process Compilation Unit to get line table
-                    line_offset = 0
-                    for at in DWARF.children(cu)
-                        if DWARF.tag(at) == DWARF.DW_AT_stmt_list
-                            line_offset = convert(UInt, at)
-                        end
-                    end
+                    line_offset::UInt = try; DWARF.extract_attribute(cu, DWARF.DW_AT_stmt_list); catch; 0; end
                     seek(dbgs.debug_line, line_offset)
                     linetab = DWARF.LineTableSupport.LineTable(h.io)
                     entry = search_linetab(linetab, ip-sstart-1)
@@ -176,19 +175,29 @@ module Gallium
 
                     # Process Subprogram to extract local variables
                     strtab = ObjFileBase.load_strtab(dbgs.debug_str)
-                    SP = DIDebug.process_SP(isa(sp, DWARF.DIETreeRef) ? sp.tree.children[1] : sp, strtab)
                     vartypes = Dict{Symbol,Type}()
                     tlinfo = ipinfo[6]
                     for x in Base.uncompressed_ast(tlinfo).args[2][1]
                         vartypes[x[1]] = isa(x[2],Symbol) ? tlinfo.module.(x[2]) : x[2]
                     end
-                    for (k,v) in SP.variables
-                        if isa(v, DWARF.Attributes.ExprLocAttribute)
-                            opcodes = v.content
-                            sm = DWARF.Expressions.StateMachine{UInt64}()
+                    fbreg = try; DWARF.extract_attribute(sp, DWARF.DW_AT_frame_base).expr[1] - DWARF.DW_OP_reg0; catch; 0; end
+                    for vardie in (filter(children(sp)) do child
+                                tag = DWARF.tag(child)
+                                tag == DWARF.DW_TAG_formal_parameter ||
+                                tag == DWARF.DW_TAG_variable
+                            end)
+                        name, loc = try
+                            (symbol(bytestring(DWARF.extract_attribute(vardie,DWARF.DW_AT_name),StrTab(dbgs.debug_str))),
+                             DWARF.extract_attribute(vardie,DWARF.DW_AT_location))
+                        catch e
+                            @show e
+                            continue
+                        end
+                        if loc.spec.form == DWARF.DW_FORM_exprloc
+                            sm = DWARF.Expressions.StateMachine{typeof(loc.value).parameters[1]}()
                             function getreg(reg)
                                 if reg == DWARF.DW_OP_fbreg
-                                    Hooking.get_reg(cursor, SP.fbreg)
+                                    Hooking.get_reg(cursor, fbreg)
                                 else
                                     Hooking.get_reg(cursor, reg)
                                 end
@@ -196,25 +205,26 @@ module Gallium
                             getword(addr) = unsafe_load(reinterpret(Ptr{UInt64}, addr))
                             addr_func(x) = x
                             val = DWARF.Expressions.evaluate_simple_location(
-                                sm, opcodes, getreg, getword, addr_func, :NativeEndian)
+                                sm, loc.value.expr, getreg, getword, addr_func, :NativeEndian)
                             if isa(val, DWARF.Expressions.MemoryLocation)
-                                val = unsafe_load(reinterpret(Ptr{vartypes[k]},
+                                val = unsafe_load(reinterpret(Ptr{vartypes[name]},
                                     val.i))
                             end
                             locals[k] = val
                         end
                     end
-                    variables = SP.variables
+                    variables = Dict()
                 catch err
                     @show err
                     Base.show_backtrace(STDOUT, catch_backtrace())
                     variables = Dict()
                     line = 0
                     file = ""
+                    sstart = 0
                 end
                 # process SP.variables here
                 #h = readmeta(IOBuffer(data))
-                push!(stack, JuliaStackFrame(h, file, ip, line, ipinfo[6], variables, locals))
+                push!(stack, JuliaStackFrame(h, file, ip, sstart, line, ipinfo[6], variables, locals))
             end
         end
         reverse!(stack)
