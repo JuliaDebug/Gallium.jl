@@ -1,4 +1,3 @@
-include("$(Pkg.dir())/DIDebug/src/DIDebugLite.jl")
 module Gallium
     using Hooking
     using ASTInterpreter
@@ -7,7 +6,6 @@ module Gallium
     using ObjFileBase
     using ELF
     using MachO
-    using DIDebug
     using AbstractTrees
     import ASTInterpreter: @enter
     export breakpoint, @enter, @breakpoint
@@ -53,9 +51,10 @@ module Gallium
     end
 
     function ASTInterpreter.print_status(x::JuliaStackFrame; kwargs...)
-        @show (x.file, x.line)
         if x.line < 0
             println("Got a negative line number. Bug?")
+        elseif isempty(x.file)
+            println("<No file found. Did DWARF parsing fail?>")
         else
             ASTInterpreter.print_sourcecode(x.linfo, readstring(x.file), x.line)
         end
@@ -79,15 +78,18 @@ module Gallium
             dbgs = debugsections(x.oh)
             cu = DWARF.searchcuforip(dbgs, UInt(x.ip)-x.sstart-1)
             sp = DWARF.searchspforip(cu, UInt(x.ip)-x.sstart-1)
-            AbstractTrees.print_tree(show, STDOUT, sp)
+            AbstractTrees.print_tree(show, IOContext(STDOUT,:strtab=>StrTab(dbgs.debug_str)), sp)
             return
         elseif command == "cu"
             dbgs = debugsections(x.oh)
             cu = DWARF.searchcuforip(dbgs, UInt(x.ip)-x.sstart-1)
-            AbstractTrees.print_tree(show, STDOUT, cu)
+            AbstractTrees.print_tree(show, IOContext(STDOUT,:strtab=>StrTab(dbgs.debug_str)), cu)
             return
         elseif command == "ip"
             println(x.ip)
+            return
+        elseif command == "sstart"
+            println(x.sstart)
             return
         elseif command == "linetabprog" || command == "linetab"
             dbgs = debugsections(x.oh)
@@ -146,11 +148,13 @@ module Gallium
                 buf = IOBuffer(data, true, true)
                 h = readmeta(buf)
                 locals = ASTInterpreter.prepare_locals(ipinfo[6])
-                local variables, line, file, sstart
+                sstart = ccall(:jl_get_section_start, UInt64, (Ptr{Void},), ip-1)
+                local variables, line, file
                 try
-                    sstart = ccall(:jl_get_section_start, UInt64, (Ptr{Void},), ip-1)
                     if isa(h, ELF.ELFHandle)
-                        ELF.relocate!(buf, h)
+                        if h.file.header.e_type != ELF.ET_DYN
+                            ELF.relocate!(buf, h)
+                        end
                     else
                         LOI = Dict(:__text => sstart,
                             :__debug_str=>0) #This one really shouldn't be necessary
@@ -160,7 +164,8 @@ module Gallium
                     cu = DWARF.searchcuforip(dbgs, UInt(ip)-sstart-1)
                     sp = DWARF.searchspforip(cu, UInt(ip)-sstart-1)
                     # Process Compilation Unit to get line table
-                    line_offset::UInt = try; DWARF.extract_attribute(cu, DWARF.DW_AT_stmt_list); catch; 0; end
+                    line_offset = DWARF.extract_attribute(cu, DWARF.DW_AT_stmt_list)
+                    line_offset = isnull(line_offset) ? 0 : convert(UInt, get(line_offset).value)
                     seek(dbgs.debug_line, line_offset)
                     linetab = DWARF.LineTableSupport.LineTable(h.io)
                     entry = search_linetab(linetab, ip-sstart-1)
@@ -180,23 +185,23 @@ module Gallium
                     for x in Base.uncompressed_ast(tlinfo).args[2][1]
                         vartypes[x[1]] = isa(x[2],Symbol) ? tlinfo.module.(x[2]) : x[2]
                     end
-                    fbreg = try; DWARF.extract_attribute(sp, DWARF.DW_AT_frame_base).expr[1] - DWARF.DW_OP_reg0; catch; 0; end
+                    fbreg = DWARF.extract_attribute(sp, DWARF.DW_AT_frame_base)
+                    fbreg = isnull(fbreg) ? -1 : get(fbreg).value.expr[1] - DWARF.DW_OP_reg0;
                     for vardie in (filter(children(sp)) do child
                                 tag = DWARF.tag(child)
                                 tag == DWARF.DW_TAG_formal_parameter ||
                                 tag == DWARF.DW_TAG_variable
                             end)
-                        name, loc = try
-                            (symbol(bytestring(DWARF.extract_attribute(vardie,DWARF.DW_AT_name),StrTab(dbgs.debug_str))),
-                             DWARF.extract_attribute(vardie,DWARF.DW_AT_location))
-                        catch e
-                            @show e
-                            continue
-                        end
+                        name = DWARF.extract_attribute(vardie,DWARF.DW_AT_name)
+                        loc = DWARF.extract_attribute(vardie,DWARF.DW_AT_location)
+                        (isnull(name) || isnull(loc)) && continue
+                        name = symbol(bytestring(get(name).value,StrTab(dbgs.debug_str)))
+                        loc = get(loc)
                         if loc.spec.form == DWARF.DW_FORM_exprloc
                             sm = DWARF.Expressions.StateMachine{typeof(loc.value).parameters[1]}()
                             function getreg(reg)
                                 if reg == DWARF.DW_OP_fbreg
+                                    (fbreg == -1) && error("fbreg requested but not found")
                                     Hooking.get_reg(cursor, fbreg)
                                 else
                                     Hooking.get_reg(cursor, reg)
@@ -207,10 +212,11 @@ module Gallium
                             val = DWARF.Expressions.evaluate_simple_location(
                                 sm, loc.value.expr, getreg, getword, addr_func, :NativeEndian)
                             if isa(val, DWARF.Expressions.MemoryLocation)
+                                !isbits(vartypes[name]) && continue
                                 val = unsafe_load(reinterpret(Ptr{vartypes[name]},
                                     val.i))
                             end
-                            locals[k] = val
+                            locals[name] = val
                         end
                     end
                     variables = Dict()
@@ -220,7 +226,6 @@ module Gallium
                     variables = Dict()
                     line = 0
                     file = ""
-                    sstart = 0
                 end
                 # process SP.variables here
                 #h = readmeta(IOBuffer(data))
