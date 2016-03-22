@@ -53,7 +53,7 @@ module Gallium
     function ASTInterpreter.print_status(x::JuliaStackFrame; kwargs...)
         if x.line < 0
             println("Got a negative line number. Bug?")
-        elseif isempty(x.file)
+        elseif isempty(x.file) || x.line == 0
             println("<No file found. Did DWARF parsing fail?>")
         else
             ASTInterpreter.print_sourcecode(x.linfo, readstring(x.file), x.line)
@@ -71,18 +71,22 @@ module Gallium
 
     # Use this hook to expose extra functionality
     function ASTInterpreter.unknown_command(x::JuliaStackFrame, command)
+        lip = UInt(x.ip)-x.sstart-1
+        @osx_only if MachO.readheader(x.oh).filetype != MachO.MH_DSYM
+            lip = UInt(ip)-1
+        end
         if command == "handle"
             eval(Main,:(h = $(x.oh)))
             error()
         elseif command == "sp"
             dbgs = debugsections(x.oh)
-            cu = DWARF.searchcuforip(dbgs, UInt(x.ip)-x.sstart-1)
-            sp = DWARF.searchspforip(cu, UInt(x.ip)-x.sstart-1)
+            cu = DWARF.searchcuforip(dbgs, lip)
+            sp = DWARF.searchspforip(cu, lip)
             AbstractTrees.print_tree(show, IOContext(STDOUT,:strtab=>StrTab(dbgs.debug_str)), sp)
             return
         elseif command == "cu"
             dbgs = debugsections(x.oh)
-            cu = DWARF.searchcuforip(dbgs, UInt(x.ip)-x.sstart-1)
+            cu = DWARF.searchcuforip(dbgs, lip)
             AbstractTrees.print_tree(show, IOContext(STDOUT,:strtab=>StrTab(dbgs.debug_str)), cu)
             return
         elseif command == "ip"
@@ -151,6 +155,7 @@ module Gallium
                 sstart = ccall(:jl_get_section_start, UInt64, (Ptr{Void},), ip-1)
                 local variables, line, file
                 try
+                    lip = UInt(ip)-sstart-1
                     if isa(h, ELF.ELFHandle)
                         if h.file.header.e_type != ELF.ET_DYN
                             ELF.relocate!(buf, h)
@@ -159,16 +164,20 @@ module Gallium
                         LOI = Dict(:__text => sstart,
                             :__debug_str=>0) #This one really shouldn't be necessary
                         MachO.relocate!(buf, h; LOI=LOI)
+                        # TODO: Unify this
+                        if MachO.readheader(h).filetype != MachO.MH_DSYM
+                            lip = UInt(ip)-1
+                        end
                     end
                     dbgs = debugsections(h)
-                    cu = DWARF.searchcuforip(dbgs, UInt(ip)-sstart-1)
-                    sp = DWARF.searchspforip(cu, UInt(ip)-sstart-1)
+                    cu = DWARF.searchcuforip(dbgs, lip)
+                    sp = DWARF.searchspforip(cu, lip)
                     # Process Compilation Unit to get line table
                     line_offset = DWARF.extract_attribute(cu, DWARF.DW_AT_stmt_list)
                     line_offset = isnull(line_offset) ? 0 : convert(UInt, get(line_offset).value)
                     seek(dbgs.debug_line, line_offset)
                     linetab = DWARF.LineTableSupport.LineTable(h.io)
-                    entry = search_linetab(linetab, ip-sstart-1)
+                    entry = search_linetab(linetab, lip)
                     line = entry.line
                     fileentry = linetab.header.file_names[entry.file]
                     if fileentry.dir_idx == 0
@@ -186,7 +195,9 @@ module Gallium
                         vartypes[x[1]] = isa(x[2],Symbol) ? tlinfo.module.(x[2]) : x[2]
                     end
                     fbreg = DWARF.extract_attribute(sp, DWARF.DW_AT_frame_base)
-                    fbreg = isnull(fbreg) ? -1 : get(fbreg).value.expr[1] - DWARF.DW_OP_reg0;
+                    # Array is for DWARF 2 support.
+                    fbreg = isnull(fbreg) ? -1 :
+                        (isa(get(fbreg).value, Array) ? get(fbreg).value[1] : get(fbreg).value.expr[1]) - DWARF.DW_OP_reg0
                     for vardie in (filter(children(sp)) do child
                                 tag = DWARF.tag(child)
                                 tag == DWARF.DW_TAG_formal_parameter ||
