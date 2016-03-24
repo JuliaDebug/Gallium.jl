@@ -53,7 +53,7 @@ module Gallium
     function ASTInterpreter.print_status(x::JuliaStackFrame; kwargs...)
         if x.line < 0
             println("Got a negative line number. Bug?")
-        elseif isempty(x.file) || x.line == 0
+        elseif (!isa(x.file,String) || isempty(x.file)) || x.line == 0
             println("<No file found. Did DWARF parsing fail?>")
         else
             ASTInterpreter.print_sourcecode(x.linfo, readstring(x.file), x.line)
