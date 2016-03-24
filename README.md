@@ -25,15 +25,11 @@ To install Gallium, run the following:
 ```
 Pkg.add("Reactive")
 Pkg.checkout("Reactive")
-Pkg.clone("https://github.com/Keno/JITTools.jl.git")
-# Only for extra functionality by DIDebug. Not needed for normal operation
-# i.e. does not need a special Cxx configuration of julia.
-Pkg.clone("https://github.com/Keno/Cxx.jl.git")
 Pkg.clone("https://github.com/Keno/ObjFileBase.jl.git")
+Pkg.clone("https://github.com/Keno/StructIO.jl.git")
 Pkg.clone("https://github.com/Keno/DWARF.jl.git")
 Pkg.clone("https://github.com/Keno/ELF.jl.git")
 Pkg.clone("https://github.com/Keno/MachO.jl.git")
-Pkg.clone("https://github.com/Keno/DIDebug.jl.git")
 Pkg.clone("https://github.com/Keno/TerminalUI.jl.git")
 Pkg.clone("https://github.com/Keno/Gallium.jl.git")
 Pkg.clone("https://github.com/Keno/MachO.jl.git")
