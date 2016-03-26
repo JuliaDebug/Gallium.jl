@@ -225,6 +225,10 @@ module Gallium
                                     !isbits(vartypes[name]) && continue
                                     val = unsafe_load(reinterpret(Ptr{vartypes[name]},
                                         val.i))
+                                elseif isa(val, DWARF.Expressions.RegisterLocation)
+                                    # The value will generally be in the low bits of the
+                                    # register. This should give the appropriate value
+                                    val = reinterpret(vartypes[name],[getreg(val.i)])[]
                                 end
                                 locals[name] = val
                             end
