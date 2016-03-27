@@ -135,7 +135,12 @@ module Gallium
 
     # Validate that an address is a valid location in the julia heap
     function heap_validate(ptr)
-        ccall(:jl_gc_find_region,Ptr{Void},(Ptr{Void},Cint),ptr,1) != C_NULL
+        typeptr = Ptr{Ptr{Void}}(ptr-sizeof(Ptr))
+        Hooking.mem_validate(typeptr,sizeof(Ptr)) || return false
+        T = UInt(unsafe_load(typeptr))&(~UInt(0x3))
+        typetypeptr = Ptr{Ptr{Void}}(T-sizeof(Ptr))
+        Hooking.mem_validate(typetypeptr,sizeof(Ptr)) || return false
+        UInt(unsafe_load(typetypeptr))&(~UInt(0x3)) == UInt(pointer_from_objref(DataType))
     end
 
     function stackwalk(RC)
