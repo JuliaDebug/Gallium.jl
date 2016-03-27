@@ -7,3 +7,9 @@ end
 	sinthesin(i)
     end
 end
+
+type averymutabletype
+    a::Int
+end
+
+@noinline sinthesin(a::averymutabletype) = sinthesin(a.a)

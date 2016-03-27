@@ -39,13 +39,13 @@ module Gallium
         argnames = Base.uncompressed_ast(linfo).args[1][2:end]
         ASTInterpreter.print_locals(io, x.locals, (io,name)->begin
             if haskey(x.variables, name)
-                if x.variables[name] == 0x0
-                    println(io, "<found in DWARF but unavailable>")
+                if x.variables[name] == :available
+                    println(io, "<undefined>")
                 else
-                    println(io, "<available>")
+                    println(io, "<not available here>")
                 end
             else
-                println(io, "<not found in DWARF>")
+                println(io, "<optimized out>")
             end
         end)
     end
@@ -133,6 +133,11 @@ module Gallium
         last_entry
     end
 
+    # Validate that an address is a valid location in the julia heap
+    function heap_validate(ptr)
+        ccall(:jl_gc_find_region,Ptr{Void},(Ptr{Void},Cint),ptr,1) != C_NULL
+    end
+
     function stackwalk(RC)
         stack = Any[]
         Hooking.rec_backtrace(RC) do cursor
@@ -197,6 +202,7 @@ module Gallium
                         # Array is for DWARF 2 support.
                         fbreg = isnull(fbreg) ? -1 :
                             (isa(get(fbreg).value, Array) ? get(fbreg).value[1] : get(fbreg).value.expr[1]) - DWARF.DW_OP_reg0
+                        variables = Dict()
                         for vardie in (filter(children(sp)) do child
                                     tag = DWARF.tag(child)
                                     tag == DWARF.DW_TAG_formal_parameter ||
@@ -221,19 +227,38 @@ module Gallium
                                 addr_func(x) = x
                                 val = DWARF.Expressions.evaluate_simple_location(
                                     sm, loc.value.expr, getreg, getword, addr_func, :NativeEndian)
+                                variables[name] = :found
                                 if isa(val, DWARF.Expressions.MemoryLocation)
-                                    !isbits(vartypes[name]) && continue
-                                    val = unsafe_load(reinterpret(Ptr{vartypes[name]},
-                                        val.i))
+                                    if isbits(vartypes[name])
+                                        val = unsafe_load(reinterpret(Ptr{vartypes[name]},
+                                            val.i))
+                                    else
+                                        ptr = reinterpret(Ptr{Void}, val.i)
+                                        if ptr == C_NULL
+                                            val = Nullable{Ptr{vartypes[name]}}()
+                                        elseif heap_validate(ptr)
+                                            val = unsafe_pointer_to_objref(ptr)
+                                        # This is a heuristic. Should update to check
+                                        # whether the variable is declared as jl_value_t
+                                        elseif Hooking.mem_validate(ptr, sizeof(Ptr{Void}))
+                                            ptr2 = unsafe_load(Ptr{Ptr{Void}}(ptr))
+                                            if ptr2 == C_NULL
+                                                val = Nullable{Ptr{vartypes[name]}}()
+                                            elseif heap_validate(ptr2)
+                                                val = unsafe_pointer_to_objref(ptr2)
+                                            end
+                                        end
+                                    end
+                                    variables[name] = :available
                                 elseif isa(val, DWARF.Expressions.RegisterLocation)
                                     # The value will generally be in the low bits of the
                                     # register. This should give the appropriate value
                                     val = reinterpret(vartypes[name],[getreg(val.i)])[]
+                                    variables[name] = :available
                                 end
                                 locals[name] = val
                             end
                         end
-                        variables = Dict()
                     catch err
                         @show err
                         Base.show_backtrace(STDOUT, catch_backtrace())
