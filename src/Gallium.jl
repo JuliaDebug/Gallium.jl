@@ -36,7 +36,7 @@ module Gallium
         print(io, "[$num] ")
         linfo = x.linfo
         ASTInterpreter.print_linfo_desc(io, linfo)
-        argnames = Base.uncompressed_ast(linfo).args[1][2:end]
+        argnames = linfo.slotnames[2:linfo.nargs]
         ASTInterpreter.print_locals(io, x.locals, (io,name)->begin
             if haskey(x.variables, name)
                 if x.variables[name] == :available
@@ -200,8 +200,14 @@ module Gallium
                         strtab = ObjFileBase.load_strtab(dbgs.debug_str)
                         vartypes = Dict{Symbol,Type}()
                         tlinfo = ipinfo[6]
-                        for x in Base.uncompressed_ast(tlinfo).args[2][1]
-                            vartypes[x[1]] = isa(x[2],Symbol) ? tlinfo.module.(x[2]) : x[2]
+                        if tlinfo.slottypes === nothing
+                            for name in tlinfo.slotnames
+                                vartypes[name] = Any
+                            end
+                        else
+                            for (name, ty) in zip(tlinfo.slotnames, tlinfo.slottypes)
+                                vartypes[name] = ty
+                            end
                         end
                         fbreg = DWARF.extract_attribute(sp, DWARF.DW_AT_frame_base)
                         # Array is for DWARF 2 support.
@@ -281,8 +287,8 @@ module Gallium
         stack = stackwalk(RC)
         stacktop = pop!(stack)
         linfo = stacktop.linfo
-        argnames = Base.uncompressed_ast(linfo).args[1][2:end]
-        spectypes = map(x->x[2], Base.uncompressed_ast(linfo).args[2][1][2:length(argnames)+1])
+        argnames = linfo.slotnames[2:linfo.nargs]
+        spectypes = linfo.specTypes.parameters[2:end]
         thunk = Expr(:->,Expr(:tuple,argnames...),Expr(:block,
             :(linfo = $linfo),
             :((loctree, code) = ASTInterpreter.reparse_meth(linfo)),
