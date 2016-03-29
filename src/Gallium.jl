@@ -18,7 +18,7 @@ module Gallium
         line::Int
         linfo::LambdaInfo
         variables::Dict
-        locals::Dict
+        env::Environment
     end
 
     immutable CStackFrame
@@ -36,8 +36,7 @@ module Gallium
         print(io, "[$num] ")
         linfo = x.linfo
         ASTInterpreter.print_linfo_desc(io, linfo)
-        argnames = linfo.slotnames[2:linfo.nargs]
-        ASTInterpreter.print_locals(io, x.locals, (io,name)->begin
+        ASTInterpreter.print_locals(io, linfo, x.env, (io,name)->begin
             if haskey(x.variables, name)
                 if x.variables[name] == :available
                     println(io, "<undefined>")
@@ -65,7 +64,7 @@ module Gallium
     end
 
     function ASTInterpreter.get_env_for_eval(x::JuliaStackFrame)
-        ASTInterpreter.Environment(copy(x.locals), Dict{Symbol, Any}())
+        copy(x.env)
     end
     ASTInterpreter.get_linfo(x::JuliaStackFrame) = x.linfo
 
@@ -157,7 +156,8 @@ module Gallium
                 data = copy(arr)
                 buf = IOBuffer(data, true, true)
                 h = readmeta(buf)
-                locals = ASTInterpreter.prepare_locals(ipinfo[6])
+                tlinfo = ipinfo[6]::LambdaInfo
+                env = ASTInterpreter.prepare_locals(tlinfo)
                 sstart = ccall(:jl_get_section_start, UInt64, (Ptr{Void},), ip-1)
                 variables = Dict()
                 line = 0
@@ -199,7 +199,6 @@ module Gallium
                         # Process Subprogram to extract local variables
                         strtab = ObjFileBase.load_strtab(dbgs.debug_str)
                         vartypes = Dict{Symbol,Type}()
-                        tlinfo = ipinfo[6]
                         if tlinfo.slottypes === nothing
                             for name in tlinfo.slotnames
                                 vartypes[name] = Any
@@ -267,7 +266,10 @@ module Gallium
                                     val = reinterpret(vartypes[name],[getreg(val.i)])[]
                                     variables[name] = :available
                                 end
-                                locals[name] = val
+                                varidx = findfirst(tlinfo.slotnames, names)
+                                if varidx != 0
+                                    env.locals[varidx] = Nullable{Any}(val)
+                                end
                             end
                         end
                     catch err
@@ -277,7 +279,7 @@ module Gallium
                 end
                 # process SP.variables here
                 #h = readmeta(IOBuffer(data))
-                push!(stack, JuliaStackFrame(h, file, ip, sstart, line, ipinfo[6], variables, locals))
+                push!(stack, JuliaStackFrame(h, file, ip, sstart, line, ipinfo[6], variables, env))
             end
         end
         reverse!(stack)
@@ -290,16 +292,13 @@ module Gallium
         argnames = linfo.slotnames[2:linfo.nargs]
         spectypes = linfo.specTypes.parameters[2:end]
         thunk = Expr(:->,Expr(:tuple,argnames...),Expr(:block,
-            :(linfo = $linfo),
+            :(linfo = $(quot(linfo))),
             :((loctree, code) = ASTInterpreter.reparse_meth(linfo)),
-            :(locals = ASTInterpreter.prepare_locals(linfo)),
-            :(for (k,v) in zip(linfo.sparam_syms, linfo.sparam_vals)
-                locals[k] = v
-            end),
-            :(merge!(locals,$(Expr(:call,:Dict,
-            [:($(quot(x)) => $x) for x in argnames]...)))),
-            :(interp = ASTInterpreter.enter(linfo,ASTInterpreter.Environment(
-                locals),
+            :(__env = ASTInterpreter.prepare_locals(linfo.def)),
+            :(copy!(__env.sparams, linfo.sparam_vals)),
+            :(__env.locals[1] = Nullable{Any}()),
+            [ :(__env.locals[$i + 1] = Nullable{Any}($(argnames[i]))) for i = 1:length(argnames) ]...,
+            :(interp = ASTInterpreter.enter(linfo,__env,
                 $(collect(filter(x->!isa(x,CStackFrame),stack)));
                     loctree = loctree, code = code)),
             :(ASTInterpreter.RunDebugREPL(interp)),
