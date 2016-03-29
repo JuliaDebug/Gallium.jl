@@ -266,7 +266,7 @@ module Gallium
                                     val = reinterpret(vartypes[name],[getreg(val.i)])[]
                                     variables[name] = :available
                                 end
-                                varidx = findfirst(tlinfo.slotnames, names)
+                                varidx = findfirst(tlinfo.slotnames, name)
                                 if varidx != 0
                                     env.locals[varidx] = Nullable{Any}(val)
                                 end
