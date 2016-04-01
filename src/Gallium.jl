@@ -1,5 +1,4 @@
 module Gallium
-    using Hooking
     using ASTInterpreter
     using Base.Meta
     using DWARF
@@ -9,6 +8,8 @@ module Gallium
     using AbstractTrees
     import ASTInterpreter: @enter
     export breakpoint, @enter, @breakpoint
+
+    include("Hooking/Hooking.jl")
 
     immutable JuliaStackFrame
         oh
