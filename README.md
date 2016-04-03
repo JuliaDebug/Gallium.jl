@@ -27,21 +27,8 @@ using Gallium
 
 To install Gallium, run the following:
 ```
-Pkg.add("Reactive")
+Pkg.add("Gallium")
 Pkg.checkout("Reactive")
-Pkg.clone("https://github.com/Keno/ObjFileBase.jl.git")
-Pkg.clone("https://github.com/Keno/StructIO.jl.git")
-Pkg.clone("https://github.com/Keno/AbstractTrees.jl.git")
-Pkg.clone("https://github.com/Keno/DWARF.jl.git")
-Pkg.clone("https://github.com/Keno/ELF.jl.git")
-Pkg.clone("https://github.com/Keno/MachO.jl.git")
-Pkg.clone("https://github.com/Keno/TerminalUI.jl.git")
-Pkg.clone("https://github.com/Keno/LineNumbers.jl.git")
-Pkg.clone("https://github.com/Keno/ASTInterpreter.jl.git")
-Pkg.clone("https://github.com/Keno/VT100.jl.git")
-Pkg.clone("https://github.com/Keno/Hooking.jl.git")
-Pkg.add("JuliaParser")
 Pkg.checkout("JuliaParser")
 Pkg.checkout("StrPack")
-Pkg.clone("https://github.com/Keno/Gallium.jl.git")
 ```
