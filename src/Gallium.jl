@@ -159,6 +159,7 @@ module Gallium
                 h = readmeta(buf)
                 tlinfo = ipinfo[6]::LambdaInfo
                 env = ASTInterpreter.prepare_locals(tlinfo)
+                copy!(env.sparams, tlinfo.sparam_vals)
                 sstart = ccall(:jl_get_section_start, UInt64, (Ptr{Void},), ip-1)
                 variables = Dict()
                 line = 0
