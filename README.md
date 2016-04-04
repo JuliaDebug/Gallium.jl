@@ -4,7 +4,7 @@
 
 # Usage
 
-For commands available at the prompt, please see the ASTInterpreter.jl README
+**IMPORTANT**: For commands available at the prompt, please see the [ASTInterpreter.jl](https://github.com/Keno/ASTInterpreter.jl) README
 
 ## Setting a breakpoint
 
@@ -25,23 +25,26 @@ using Gallium
 
 # Installation
 
-To install Gallium, run the following:
+To install Gallium you may simply run
 ```
-Pkg.add("Reactive")
+Pkg.add("Gallium")
+```
+If you wish to run the latest development version, you may also require the development version of Gallium's
+dependencies. The appropriate command to move to these development versions is provided below for convencience.
+However, it is **strongly** recommended that most users make use of the released version instead.
+```
 Pkg.checkout("Reactive")
-Pkg.clone("https://github.com/Keno/ObjFileBase.jl.git")
-Pkg.clone("https://github.com/Keno/StructIO.jl.git")
-Pkg.clone("https://github.com/Keno/AbstractTrees.jl.git")
-Pkg.clone("https://github.com/Keno/DWARF.jl.git")
-Pkg.clone("https://github.com/Keno/ELF.jl.git")
-Pkg.clone("https://github.com/Keno/MachO.jl.git")
-Pkg.clone("https://github.com/Keno/TerminalUI.jl.git")
-Pkg.clone("https://github.com/Keno/LineNumbers.jl.git")
-Pkg.clone("https://github.com/Keno/ASTInterpreter.jl.git")
-Pkg.clone("https://github.com/Keno/VT100.jl.git")
-Pkg.clone("https://github.com/Keno/Hooking.jl.git")
-Pkg.add("JuliaParser")
+Pkg.checkout("ObjFileBase")
+Pkg.checkout("StructIO")
+Pkg.checkout("AbstractTrees")
+Pkg.checkout("DWARF")
+Pkg.checkout("ELF")
+Pkg.checkout("MachO")
+Pkg.checkout("TerminalUI")
+Pkg.checkout("LineNumbers")
+Pkg.checkout("ASTInterpreter")
+Pkg.checkout("VT100")
+Pkg.checkout("Hooking")
 Pkg.checkout("JuliaParser")
-Pkg.checkout("StrPack")
-Pkg.clone("https://github.com/Keno/Gallium.jl.git")
+Pkg.checkout("Gallium")
 ```
