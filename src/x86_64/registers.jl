@@ -18,10 +18,14 @@ module X86_64
   58 => symbol("fs.base"), 59 => symbol("gs.base"),
   62 => :tr, 63 => :ldtr, 64 => :mxcsr, 65 => :fcw,
   66 => :fsw)
-  const inverse_dwarf = map((k,v)->v=>k, dwarf_numbering)
-  
-  # Basic Register Set
+  const inverse_dwarf = map(p->p[2]=>p[1], dwarf_numbering)
   const basic_regs = 0:16
+  
+  const gdb_numbering = Dict{Int, Symbol}(
+    (i => dwarf_numbering[i] for i in basic_regs)...)
+  const inverse_gdb = map(p->p[2]=>p[1], gdb_numbering)
+
+  # Basic Register Set
   const RegT = RegisterValue{UInt64}
   @eval type BasicRegs <: RegisterSet
       $(Expr(:block, (
@@ -30,7 +34,7 @@ module X86_64
   end
   Registers.ip(regs::RegisterSet) = regs.rip
   Registers.set_ip!(reg::RegisterSet, ip) = regs.rip = ip
-  Registers.set_sp!(reg::RegisterSet, ip) = regs.rip = sp
+  Registers.set_sp!(reg::RegisterSet, sp) = regs.rip = sp
   function Registers.invalidate_regs!(regs::BasicRegs)
       for fieldi = 1:nfields(regs)
           setfield(regs, i, Registers.invalidated(getfield(regs, i)))
@@ -41,7 +45,7 @@ module X86_64
       (reg < endof(basic_regs)) && (setfield(regs, reg, value))
   end
 
-  function Register.get_dwarf(regs::BasicRegs, reg)
+  function Registers.get_dwarf(regs::BasicRegs, reg)
       (reg < endof(basic_regs)) ? getfield(regs, reg) :
         RegisterValue{UInt64}(0, 0)
   end
