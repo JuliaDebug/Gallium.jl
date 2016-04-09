@@ -97,7 +97,7 @@ function fetch_cfi_value(s, r, resolution, cfa_addr)
     elseif isa(resolution, CallFrameInfo.Reg)
         return get_dwarf(r, resolution.n)
     else
-        error("Unknown resolution")
+        error("Unknown resolution $resolution")
     end
 end
 
@@ -124,6 +124,7 @@ function unwind_step(s, modules, r)
     
     # By definition, the next frame's stack pointer is our CFA
     set_sp!(new_registers, cfa)
+    isa(rs[cie.return_reg], CallFrameInfo.Undef) && return (false, r)
     # Find current frame's return address, (i.e. the new frame's ip)
     set_ip!(new_registers, fetch_cfi_value(s, r, rs[cie.return_reg], cfa))
     # Now set other registers recorded in the CFI
