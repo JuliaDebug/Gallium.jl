@@ -187,11 +187,10 @@ module Gallium
                 variables = Dict()
                 line = 0
                 file = ""
-                dbgs = debugsections(handle(h))
+                dbgs = debugsections(dhandle(h))
                 try
                     lip = UInt(theip)-sstart-1
-                    if (isa(handle(h), ELF.ELFHandle) && handle(h).file.header.e_type == ELF.ET_REL) ||
-                        (isa(handle(h), MachO.MachOHandle) && MachO.readheader(handle(h)).filetype != MachO.MH_DSYM)
+                    if isrelocatable(handle(h))
                         lip = UInt(theip)-1
                     end
                     cu = DWARF.searchcuforip(dbgs, lip)
@@ -199,8 +198,9 @@ module Gallium
                     # Process Compilation Unit to get line table
                     line_offset = DWARF.extract_attribute(cu, DWARF.DW_AT_stmt_list)
                     line_offset = isnull(line_offset) ? 0 : convert(UInt, get(line_offset).value)
+
                     seek(dbgs.debug_line, line_offset)
-                    linetab = DWARF.LineTableSupport.LineTable(handle(h).io)
+                    linetab = DWARF.LineTableSupport.LineTable(handle(dbgs).io)
                     entry = search_linetab(linetab, lip)
                     line = entry.line
                     fileentry = linetab.header.file_names[entry.file]

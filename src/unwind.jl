@@ -8,7 +8,9 @@ using Gallium
 using ..Registers
 using ..Registers: ip
 using ObjFileBase
+using ObjFileBase: Sections, mangle_sname
 using ELF
+using MachO
 using Gallium: find_module, Module, load
 
 
@@ -20,11 +22,11 @@ end
 
 function find_fde(mod, modrel)
     slide = 0
-    eh_frame = first(filter(x->sectionname(x)==".eh_frame",ELF.Sections(handle(mod))))
+    eh_frame = first(filter(x->sectionname(x)==mangle_sname(handle(mod),"eh_frame"),Sections(handle(mod))))
     if isa(mod, Module) && !isempty(mod.FDETab)
         tab = mod.FDETab
     else
-        eh_frame_hdr = first(filter(x->sectionname(x)==".eh_frame_hdr",ELF.Sections(handle(mod))))
+        eh_frame_hdr = first(filter(x->sectionname(x)==mangle_sname(handle(mod),"eh_frame_hdr"),Sections(handle(mod))))
         tab = CallFrameInfo.EhFrameRef(eh_frame_hdr, eh_frame)
         modrel = Int(modrel)-Int(sectionoffset(eh_frame_hdr))
         slide = sectionoffset(eh_frame_hdr) - sectionoffset(eh_frame)
@@ -38,16 +40,11 @@ end
 function frame(s, modules, r)
     base, mod = find_module(modules, UInt(ip(r)))
     modrel = UInt(modulerel(mod, base, UInt(ip(r))))
-    fde = find_fde(mod, modrel)
+    loc, fde = find_fde(mod, modrel)
     cie = realize_cie(fde)
     # Compute CFA
-    loc = initial_loc(fde, cie)
     target_delta = modrel - loc
-    if handle(mod).file.header.e_type == ELF.ET_REL
-        eh_frame = first(filter(x->sectionname(x) == ".eh_frame",ELF.Sections(handle(mod))))
-        target_delta = UInt(ip(r)) - (loc + deref(eh_frame).sh_addr - sectionoffset(eh_frame))
-    end
-    @assert target_delta < CallFrameInfo.fde_range(fde, cie)
+    @assert target_delta < UInt(CallFrameInfo.fde_range(fde, cie))
     # out = IOContext(STDOUT, :reg_map => Gallium.X86_64.dwarf_numbering)
     # drs = CallFrameInfo.RegStates()
     # CallFrameInfo.dump_program(out, cie, target = UInt(target_delta), rs = drs); println(out)
@@ -76,24 +73,30 @@ end
 function symbolicate(modules, ip)
     base, mod = find_module(modules, ip)
     modrel = UInt(modulerel(mod, base, ip))
-    fde = find_fde(mod, modrel)
+    loc, fde = find_fde(mod, modrel)
     cie = realize_cie(fde)
-    fbase = initial_loc(fde, cie)
-    sections = ELF.Sections(handle(mod))
-    if handle(mod).file.header.e_type == ELF.ET_REL
+    #loc = initial_loc(fde, cie)
+    sections = Sections(handle(mod))
+    #=if handle(mod).file.header.e_type == ELF.ET_REL
         eh_frame = first(filter(x->sectionname(x) == ".eh_frame",sections))
         fbase += deref(eh_frame).sh_addr - sectionoffset(eh_frame)
-    end
+    end=#
     local syms
-    secs = collect(filter(x->sectionname(x) == ".symtab",sections))
-    isempty(secs) && (secs = collect(filter(x->sectionname(x) == ".dynsym",sections)))
-    syms = ELF.Symbols(secs[1])
+    if isa(handle(mod), ELF.ELFHandle)
+        secs = collect(filter(x->sectionname(x) == ".symtab",sections))
+        isempty(secs) && (secs = collect(filter(x->sectionname(x) == ".dynsym",sections)))
+        syms = ELF.Symbols(secs[1])
+    else
+        syms = MachO.Symbols(handle(mod))
+    end
     idx = findfirst(syms) do x
-        value = ELF.symbolvalue(x, sections)
-        value == fbase
+        MachO.isundef(x) && return false
+        value = symbolvalue(x, sections)
+        #@show value
+        value == loc
     end
     idx == 0 && return "???"
-    symname(syms[idx]; strtab = ELF.StrTab(syms))
+    symname(syms[idx]; strtab = StrTab(syms))
 end
 
 function fetch_cfi_value(s, r, resolution, cfa_addr)
@@ -135,7 +138,7 @@ function unwind_step(s, modules, r)
         set_ip!(new_registers, fetch_cfi_value(s, r, rs[cie.return_reg], get_sp(r)))
         return new_registers
     end=#
-    
+
     # By definition, the next frame's stack pointer is our CFA
     set_sp!(new_registers, UInt(cfa))
     isa(rs[cie.return_reg], CallFrameInfo.Undef) && return (false, r)

@@ -1,7 +1,7 @@
 using DWARF
 using DWARF.CallFrameInfo
 using ObjFileBase
-using ObjFileBase: handle
+using ObjFileBase: handle, isrelocatable, Sections, mangle_sname
 
 """
 Keeps a list of local modules, lazy loading those that it doesn't have from
@@ -9,24 +9,31 @@ the current process's address space.
 """
 immutable Module
     handle::Any
+    # If the object containing this module's DWARF info is different,
+    # this is the handle to it
+    dwarfhandle::Any
     FDETab::Vector{Tuple{Int,UInt}}
 end
 ObjFileBase.handle(mod::Module) = mod.handle
-immutable LazyLocalModules
+dhandle(mod::Module) = mod.dwarfhandle
+type LazyLocalModules
     modules::Dict{UInt, Module}
+    nsharedlibs::Int
 end
-LazyLocalModules() = LazyLocalModules(Dict{UInt, Any}())
+LazyLocalModules() = LazyLocalModules(Dict{UInt, Any}(), 0)
 
 function _find_module(modules, ip)
     for (base, h) in modules
         (base, ip) = (UInt(base), UInt(ip))
         # TODO: cache this
         local sz
-        if handle(h).file.header.e_type == ELF.ET_REL
-            sz = sectionsize(first(filter(x->sectionname(x) == ".text", ELF.Sections(handle(h)))))
-        else
+        if isrelocatable(handle(h))
+            sz = sectionsize(first(filter(x->sectionname(x) == mangle_sname(handle(h),"text"), Sections(handle(h)))))
+        elseif isa(handle(h), ELF.ELFHandle)
             phs = ELF.ProgramHeaders(handle(h))
             sz = first(filter(x->x.p_type == ELF.PT_LOAD, phs)).p_memsz
+        elseif isa(handle(h), MachO.MachOHandle)
+            sz = deref(first(filter(x->isa(deref(x),MachO.segment_commands), LoadCmds(handle(h))))).vmsize
         end
         if base <= ip <= base + sz
             return (base, h)
@@ -46,42 +53,111 @@ base is the remote address of the text section
 """
 function make_fdetab(base, mod)
     FDETab = Vector{Tuple{Int,UInt}}()
-    eh_frame = first(filter(x->sectionname(x)==".eh_frame",ELF.Sections(mod)))
+    eh_frame = first(filter(x->sectionname(x)==mangle_sname(mod,"eh_frame"),Sections(mod)))
     for fde in FDEIterator(eh_frame)
-        # Make this location, relative to base. A priori, it is an offset from 
-        # the load address of the FDE.
-        ip = (deref(eh_frame).sh_addr - sectionoffset(eh_frame) + initial_loc(fde)) - base
+        # Make this location, relative to base. Note that base means something different,
+        # depending on whether we're isrelocatable or not. If we are, base is the load address
+        # of the text section. Otherwise, base is the load address of the start of the mapping.
+        if isa(mod, ELF.ELFHandle)
+            # For relocated ELF Objects and unlrelocated shared libraries,
+            # it is an offset from the load address of the FDE (in the shared library case,
+            # sh_addr == sectionoffset).
+            ip = (deref(eh_frame).sh_addr - sectionoffset(eh_frame) + initial_loc(fde)) - base
+        elseif isrelocatable(mod)
+            # MachO eh_frame section doesn't get relocated, so it's still relative to
+            # the file's local address space.
+            text = first(filter(x->sectionname(x)==mangle_sname(mod,"text"),Sections(mod)))
+            ip = initial_loc(fde) - sectionoffset(text)
+        else
+            ip = initial_loc(fde)
+        end
         push!(FDETab,(ip, fde.offset))
     end
     sort!(FDETab, by=x->x[1])
     FDETab
 end
 
+function obtain_uuid(h)
+    deref(first(filter(x->isa(deref(x),MachO.uuid_command), LoadCmds(h)))).uuid
+end
+
+@osx_only function obtain_dsym(fname, objecth)
+    dsympath = string(fname, ".dSYM/Contents/Resources/DWARF/", basename(fname))
+    isfile(dsympath) || return objecth
+    debugh = readmeta(IOBuffer(open(read, dsympath)))
+    (obtain_uuid(objecth) != obtain_uuid(debugh)) && return debugh
+    debugh
+end
+
+@osx_only function update_shlibs!(modules)
+    nactuallibs = ccall(:_dyld_image_count, UInt32, ())
+    if modules.nsharedlibs != nactuallibs
+        for idx in (modules.nsharedlibs+1):nactuallibs
+            idx -= 1
+            base = ccall(:_dyld_get_image_vmaddr_slide, UInt, (UInt32,), idx)
+            fname = bytestring(
+                ccall(:_dyld_get_image_name, Ptr{UInt8}, (UInt32,), idx))
+            # these are fat, skip for now
+            (contains(fname, "libSystem") ||
+                contains(fname, "/System/Library/") ||
+                contains(fname, "libgcc") ||
+                # Hooking is odd (null length fde), need to investigate
+                contains(fname, "hooking.dylib") ||
+                startswith(fname, "/usr/lib")) &&
+                    continue
+            h = readmeta(IOBuffer(open(read, fname)))
+            # Do not record the dynamic linker in our module list
+            # Also skip the executable for now
+            ft = readheader(h).filetype
+            if ft == MachO.MH_DYLINKER || ft == MachO.MH_EXECUTE
+                continue
+            end
+            # For now, don't record shared libraries for which we only
+            # have compact unwind info.
+            ehfs = collect(filter(x->sectionname(x)==mangle_sname(h,"eh_frame"),Sections(h)))
+            length(collect(ehfs)) == 0 && continue
+            fdetab = make_fdetab(base, h)
+            modules.modules[base] = Module(h, obtain_dsym(fname, h), fdetab)
+        end
+        modules.nsharedlibs = nactuallibs
+        return true
+    end
+    return false
+end
+
+
+@linux_only function update_shlibs!()
+    return false
+end
+
 function find_module(modules::LazyLocalModules, ip)
     ret = _find_module(modules.modules, ip)
     if ret == nothing
+        if update_shlibs!(modules)
+            return find_module(modules, ip)
+        end
         buf = IOBuffer(copy(ccall(:jl_get_dobj_data, Any, (UInt,), ip)), true, true)
         h = readmeta(buf)
         sstart = ccall(:jl_get_section_start, UInt64, (UInt,), ip-1)
         fdetab = Vector{Tuple{Int,UInt}}()
-        if isa(h, ELF.ELFHandle)
-          if h.file.header.e_type == ELF.ET_REL
-              ELF.relocate!(buf, h)
-              fdetab = make_fdetab(sstart, h)
+        if isrelocatable(h)
+          fdetab = make_fdetab(sstart, h)
+          isa(h, ELF.ELFHandle) && ELF.relocate!(buf, h)
+          if isa(h, MachO.MachOHandle)
+            LOI = Dict(:__text => sstart,
+                :__debug_str=>0) #This one really shouldn't be necessary
+            MachO.relocate!(buf, h; LOI=LOI)
           end
-        else
-          LOI = Dict(:__text => sstart,
-              :__debug_str=>0) #This one really shouldn't be necessary
-          MachO.relocate!(buf, h; LOI=LOI)
         end
-        modules.modules[sstart] = Module(h, fdetab)
+        isa(h, MachO.MachOHandle) && isempty(fdetab) && (fdetab = make_fdetab(sstart, h))
+        modules.modules[sstart] = Module(h, h, fdetab)
         ret = (sstart, modules.modules[sstart])
     end
     ret
 end
 
 function lookup_sym(modules, name)
-  for (base, h) in modules
+    for (base, h) in modules
       symtab = ELF.Symbols(h)
       strtab = StrTab(symtab)
       idx = findfirst(x->ELF.symname(x, strtab = strtab)==name,symtab)
@@ -92,7 +168,7 @@ function lookup_sym(modules, name)
           end
           return (h, base, sym)
       end
-  end  
+    end
 end
 
 
@@ -180,7 +256,7 @@ module GlibcDyldModules
         end
         lm = load(vm, lm.l_next)
     end
-    
+
     modules
   end
 
