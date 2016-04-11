@@ -36,4 +36,30 @@ pushq   %rsi           # Makes the debugger's life easier
 movq _hooking_jl_callback@GOTPCREL(%rip), %rax
 jmpq *(%rax)
 
+.text
+.align 4,0x90
+.globl _hooking_jl_simple_savecontext
+_hooking_jl_simple_savecontext:
+nop
+movq    %rax, UC_MCONTEXT_GREGS_RAX(%rdi)
+movq    %rbx, UC_MCONTEXT_GREGS_RBX(%rdi)
+movq    %rcx, UC_MCONTEXT_GREGS_RCX(%rdi)
+movq    %rdx, UC_MCONTEXT_GREGS_RDX(%rdi)
+movq    %rdi, UC_MCONTEXT_GREGS_RDI(%rdi)
+movq    %rsi, UC_MCONTEXT_GREGS_RSI(%rdi)
+movq    %rbp, UC_MCONTEXT_GREGS_RBP(%rdi)
+movq    %rsp, UC_MCONTEXT_GREGS_RSP(%rdi)
+addq    $(UC_MCONTEXT_SIZE+8), UC_MCONTEXT_GREGS_RSP(%rdi)
+movq    %r8,  UC_MCONTEXT_GREGS_R8(%rdi)
+movq    %r9,  UC_MCONTEXT_GREGS_R9(%rdi)
+movq    %r10, UC_MCONTEXT_GREGS_R10(%rdi)
+movq    %r11, UC_MCONTEXT_GREGS_R11(%rdi)
+movq    %r12, UC_MCONTEXT_GREGS_R12(%rdi)
+movq    %r13, UC_MCONTEXT_GREGS_R13(%rdi)
+movq    %r14, UC_MCONTEXT_GREGS_R14(%rdi)
+movq    %r15, UC_MCONTEXT_GREGS_R15(%rdi)
+movq    (%rsp),%rsi
+movq    %rsi, UC_MCONTEXT_GREGS_RIP(%rdi) # store return address as rip
+retq
+
 .subsections_via_symbols

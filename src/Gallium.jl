@@ -19,8 +19,9 @@ module Gallium
     include("unwind.jl")
     include("Hooking/Hooking.jl")
 
+    using .Registers
     using .Registers: ip, get_dwarf
-
+    using .Hooking
 
     immutable JuliaStackFrame
         oh
@@ -78,25 +79,29 @@ module Gallium
     function ASTInterpreter.get_env_for_eval(x::JuliaStackFrame)
         copy(x.env)
     end
+    ASTInterpreter.get_env_for_eval(x::NativeStack) =
+        ASTInterpreter.get_env_for_eval(x.stack[end])
     ASTInterpreter.get_linfo(x::JuliaStackFrame) = x.linfo
+    ASTInterpreter.get_linfo(x::NativeStack) =
+        ASTInterpreter.get_linfo(x.stack[end])
 
     # Use this hook to expose extra functionality
     function ASTInterpreter.unknown_command(x::JuliaStackFrame, command)
         lip = UInt(x.ip)-x.sstart-1
-        @osx_only if MachO.readheader(x.oh).filetype != MachO.MH_DSYM
+        if isrelocatable(handle(x.oh))
             lip = UInt(x.ip)-1
         end
         if command == "handle"
             eval(Main,:(h = $(x.oh)))
             error()
         elseif command == "sp"
-            dbgs = debugsections(x.oh)
+            dbgs = debugsections(dhandle(x.oh))
             cu = DWARF.searchcuforip(dbgs, lip)
             sp = DWARF.searchspforip(cu, lip)
             AbstractTrees.print_tree(show, IOContext(STDOUT,:strtab=>StrTab(dbgs.debug_str)), sp)
             return
         elseif command == "cu"
-            dbgs = debugsections(x.oh)
+            dbgs = debugsections(dhandle(x.oh))
             cu = DWARF.searchcuforip(dbgs, lip)
             AbstractTrees.print_tree(show, IOContext(STDOUT,:strtab=>StrTab(dbgs.debug_str)), cu)
             return
@@ -107,11 +112,11 @@ module Gallium
             println(x.sstart)
             return
         elseif command == "linetabprog" || command == "linetab"
-            dbgs = debugsections(x.oh)
+            dbgs = debugsections(dhandle(x.oh))
             cu = DWARF.searchcuforip(dbgs, lip)
             line_offset = get(DWARF.extract_attribute(cu, DWARF.DW_AT_stmt_list))
             seek(dbgs.debug_line, UInt(line_offset.value))
-            linetab = DWARF.LineTableSupport.LineTable(x.oh.io)
+            linetab = DWARF.LineTableSupport.LineTable(handle(dbgs).io)
             (command == "linetabprog" ? DWARF.LineTableSupport.dump_program :
                 DWARF.LineTableSupport.dump_table)(STDOUT, linetab)
         end
@@ -160,6 +165,17 @@ module Gallium
         end
     end
 
+    function step_first!(RC)
+        set_ip!(RC,unsafe_load(convert(Ptr{UInt},RC.rsp[])))
+        set_sp!(RC,RC.rsp[]+sizeof(Ptr{Void}))
+    end
+
+    function rec_backtrace_hook(callback, RC)
+        callback(RC)
+        step_first!(RC)
+        rec_backtrace(callback, RC)
+    end
+
     # Validate that an address is a valid location in the julia heap
     function heap_validate(ptr)
         typeptr = Ptr{Ptr{Void}}(ptr-sizeof(Ptr))
@@ -172,7 +188,7 @@ module Gallium
 
     function stackwalk(RC)
         stack = Any[]
-        rec_backtrace(RC) do RC
+        rec_backtrace_hook(RC) do RC
             theip = reinterpret(Ptr{Void},UInt(ip(RC)))
             ipinfo = (ccall(:jl_lookup_code_address, Any, (Ptr{Void}, Cint),
               theip-1, 0))
@@ -293,7 +309,7 @@ module Gallium
                 end
                 # process SP.variables here
                 #h = readmeta(IOBuffer(data))
-                push!(stack, JuliaStackFrame(h, file, ip, sstart, line, ipinfo[6], variables, env))
+                push!(stack, JuliaStackFrame(h, file, UInt(ip(RC)), sstart, line, ipinfo[6], variables, env))
             end
         end
         reverse!(stack)
@@ -324,11 +340,11 @@ module Gallium
     end
 
     function breakpoint(addr::Ptr{Void})
-        Hooking.hook(breakpoint_hit, addr)
+        hook(breakpoint_hit, addr)
     end
 
     function breakpoint(func, args)
-        Hooking.hook(breakpoint_hit, func, args)
+        hook(breakpoint_hit, func, args)
     end
 
     macro breakpoint(ex0)
@@ -340,9 +356,41 @@ module Gallium
     # support optimized code to avoid cloberring registers. For now do the dead
     # simple, stupid thing.
     function breakpoint()
-        RC = Hooking.RegisterContext()
-        ccall(:jl_unw_getcontext,Cint,(Ptr{Void},),RC.data)
-        ASTInterpreter.RunDebugREPL(NativeStack(filter(x->isa(x,JuliaStackFrame),stackwalk(RC)[1:end-1])))
+        RC = Hooking.getcontext()
+        # -2 to skip getcontext and breakpoint()
+        ASTInterpreter.RunDebugREPL(NativeStack(filter(x->isa(x,JuliaStackFrame),stackwalk(RC)[1:end-2])))
+    end
+
+    function breakpoint_on_error_hit(thehook, RC)
+        unhook(thehook)
+        err = unsafe_pointer_to_objref(Ptr{Void}(RC.rdi[]))
+        stack = stackwalk(RC)
+        ips = [x.ip-1 for x in stack]
+        Base.with_output_color(:red, STDERR) do io
+            print(io, "ERROR: ")
+            Base.showerror(io, err, reverse(ips); backtrace=false)
+            println(io)
+        end
+        println(STDOUT)
+        ASTInterpreter.RunDebugREPL(NativeStack(filter(x->isa(x,JuliaStackFrame),stack)))
+        # Get a somewhat sensible backtrace when returning
+        try; throw(); catch; end
+        hook(thehook)
+        rethrow(err)
+    end
+
+    # Compiling these function has an error thrown/caught in type inference.
+    # Precompile them here, to make sure we make it throught
+    precompile(breakpoint_on_error_hit,(Hooking.Hook,X86_64.BasicRegs))
+    precompile(Hooking.callback,(Ptr{Void},))
+
+    function breakpoint_on_error(enable = true)
+        addr = cglobal(:jl_throw)
+        if enable
+            hook(breakpoint_on_error_hit, addr)
+        else
+            unhook(addr)
+        end
     end
 
 end

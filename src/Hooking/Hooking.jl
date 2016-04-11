@@ -4,6 +4,8 @@ using Gallium
 using Gallium: X86_64, Registers
 using Gallium.Registers: ip
 
+export hook, unhook
+
 typealias MachTask Ptr{Void}
 typealias KernReturn UInt32
 
@@ -124,6 +126,18 @@ end
 @osx_only const resume_length = 91
 @linux_only const resume_length = 0x5b
 
+function hook_asm_template(addr)
+    [
+        0x90; # 0xcc
+        0x50; #pushq   %rax
+        # movq $hookto, %rax
+        0x48; 0xb8; reinterpret(UInt8, [addr]);
+        0xff; 0xd0; #callq *%rax
+    ]
+end
+hook_asm_template() = (global thehook; hook_asm_template(thehook))
+const hook_length = length(hook_asm_template(UInt(0)))
+
 # Split this out to avoid constructing a gc frame in the callback directly
 @noinline function _callback(x::Ptr{Void})
     RC = X86_64.BasicRegs()
@@ -131,7 +145,7 @@ end
     for i in X86_64.basic_regs
         set_dwarf!(RC, i, RegisterValue{UInt64}(regs[i+1], (-1%UInt64)))
     end
-    hook_addr = UInt(ip(RC))-14
+    hook_addr = UInt(ip(RC))-hook_length
     hook = hooks[reinterpret(Ptr{Void},hook_addr)]
     ret = hook.callback(hook, copy(RC))
     if isa(ret, Deopt)
@@ -143,6 +157,7 @@ end
     end
     addr_bytes = reinterpret(UInt8,[ret_addr])
     resume_data = [
+        #0xcc,
         resume_instructions...,
         # Counteract the pushq %rip in the resume code
         0x48, 0x83, 0xc4, 0x8, # addq $8, %rsp
@@ -165,7 +180,9 @@ end
     ptr, Ptr{UInt64}(pointer(RC))::Ptr{UInt64}
 end
 function callback(x::Ptr{Void})
+    enabled = gc_enable(false)
     ptr, data = _callback(x)
+    gc_enable(enabled)
     # jump to resume code
     ccall(ptr,Void,(Ptr{Void},),data)
     nothing
@@ -235,17 +252,9 @@ function hook(callback::Function, addr)
         triple, C_NULL, 0, C_NULL, C_NULL)
     @assert DC != C_NULL
 
-
-    hook_asm_template = [
-        0x90; #0xcc;
-        0x50; #pushq   %rax
-        # movq $hookto, %rax
-        0x48; 0xb8; reinterpret(UInt8, [thehook]);
-        0xff; 0xd0; #callq *%rax
-    ]
-
     nbytes = 0
-    while nbytes < length(hook_asm_template)
+    template = hook_asm_template()
+    while nbytes < length(template)
         outs = Ref{UInt8}()
         nbytes += ccall(:jl_LLVMDisasmInstruction, Csize_t,
             (Ptr{Void}, Ptr{UInt8}, Csize_t, UInt64, Ptr{UInt8}, Csize_t),
@@ -261,13 +270,29 @@ function hook(callback::Function, addr)
     dest = pointer_to_array(convert(Ptr{UInt8}, addr), (nbytes,), false)
     orig_data = copy(dest)
 
-    hook_asm = [ hook_asm_template; zeros(UInt8,nbytes-length(hook_asm_template)) ]# Pad to nbytes
+    hook_asm = [ template; zeros(UInt8,nbytes-length(template)) ]# Pad to nbytes
+    @assert length(hook_asm) == length(orig_data)
 
     allow_writing(to_page(addr,nbytes)) do
         dest[:] = hook_asm
     end
 
+    @show addr
     hooks[addr] = Hook(addr,orig_data,callback)
+end
+
+function hook(thehook::Hook)
+    nbytes = length(thehook.orig_data)
+    template = hook_asm_template();
+    hook_asm = [ template; zeros(UInt8,nbytes-length(template)) ]# Pad to nbytes
+
+    dest = pointer_to_array(convert(Ptr{UInt8}, thehook.addr),
+        (nbytes,), false)
+    allow_writing(to_page(thehook.addr,nbytes)) do
+        dest[:] = hook_asm
+    end
+
+    hooks[thehook.addr] = thehook
 end
 
 function get_function_addr(f, t)
@@ -281,7 +306,7 @@ end
 
 hook(callback, f, t) = hook(callback, get_function_addr(f, t))
 
-function unhook(addr)
+function unhook(addr::Union{Ptr{Void},UInt64})
     hook = pop!(hooks, addr)
 
     nbytes = length(hook.orig_data)
@@ -291,6 +316,18 @@ function unhook(addr)
     allow_writing(to_page(addr,nbytes)) do
         dest[:] = hook.orig_data
     end
+end
+
+unhook(hook::Hook) = unhook(hook.addr)
+
+function getcontext()
+    ctx = Array(UInt64,length(X86_64.basic_regs))
+    ccall((:hooking_jl_simple_savecontext, hooking_lib),Void,(Ptr{UInt64},),ctx)
+    RC = X86_64.BasicRegs()
+    for i in X86_64.basic_regs
+        set_dwarf!(RC, i, RegisterValue{UInt64}(ctx[i+1], (-1%UInt64)))
+    end
+    RC
 end
 
 end # module

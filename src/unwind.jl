@@ -46,7 +46,7 @@ function frame(s, modules, r)
     loc, fde = find_fde(mod, modrel)
     cie = realize_cie(fde)
     # Compute CFA
-    target_delta = modrel - loc
+    target_delta = modrel - loc - 1
     @assert target_delta < UInt(CallFrameInfo.fde_range(fde, cie))
     # out = IOContext(STDOUT, :reg_map => Gallium.X86_64.dwarf_numbering)
     # drs = CallFrameInfo.RegStates()
