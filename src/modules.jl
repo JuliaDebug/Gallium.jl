@@ -126,7 +126,7 @@ end
 end
 
 
-@linux_only function update_shlibs!()
+@linux_only function update_shlibs!(modules)
     return false
 end
 
@@ -141,8 +141,8 @@ function find_module(modules::LazyLocalModules, ip)
         sstart = ccall(:jl_get_section_start, UInt64, (UInt,), ip-1)
         fdetab = Vector{Tuple{Int,UInt}}()
         if isrelocatable(h)
-          fdetab = make_fdetab(sstart, h)
           isa(h, ELF.ELFHandle) && ELF.relocate!(buf, h)
+          fdetab = make_fdetab(sstart, h)
           if isa(h, MachO.MachOHandle)
             LOI = Dict(:__text => sstart,
                 :__debug_str=>0) #This one really shouldn't be necessary

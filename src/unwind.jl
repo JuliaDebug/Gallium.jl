@@ -25,13 +25,16 @@ function find_fde(mod, modrel)
     eh_frame = first(filter(x->sectionname(x)==mangle_sname(handle(mod),"eh_frame"),Sections(handle(mod))))
     if isa(mod, Module) && !isempty(mod.FDETab)
         tab = mod.FDETab
+        return CallFrameInfo.search_fde_offset(eh_frame, tab, modrel, slide)
     else
         eh_frame_hdr = first(filter(x->sectionname(x)==mangle_sname(handle(mod),"eh_frame_hdr"),Sections(handle(mod))))
         tab = CallFrameInfo.EhFrameRef(eh_frame_hdr, eh_frame)
         modrel = Int(modrel)-Int(sectionoffset(eh_frame_hdr))
         slide = sectionoffset(eh_frame_hdr) - sectionoffset(eh_frame)
+        loc, fde = CallFrameInfo.search_fde_offset(eh_frame, tab, modrel, slide)
+        loc = loc + Int(sectionoffset(eh_frame_hdr))
+        return (loc, fde)
     end
-    CallFrameInfo.search_fde_offset(eh_frame, tab, modrel, slide)
 end
 
 function modulerel(mod, base, ip)
