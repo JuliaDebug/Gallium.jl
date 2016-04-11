@@ -1,47 +1,61 @@
 module Unwinder
 
-using CallFrameInfo
+using DWARF
+using DWARF.CallFrameInfo
+using ObjFileBase
+using ObjFileBase: handle
+using Gallium
 using ..Registers
 using ..Registers: ip
 using ObjFileBase
 using ELF
-using DWARF
+using Gallium: find_module, Module, load
 
-function get_word
+
+function get_word(s, ptr::RemotePtr)
+    Gallium.Hooking.mem_validate(UInt(ptr), sizeof(Ptr{Void})) || error("Invalid load")
+    load(s, RemotePtr{UInt64}(ptr))
 end
 
-function find_module(modules, ip)
-    for (base, h) in modules
-        (base, ip) = (UInt(base), UInt(ip))
-        if base <= ip <= base + filesize(h.io)
-            return (base, h)
-        end
-    end
-    error("Not found")
-end
 
 function find_fde(mod, modrel)
-    eh_frame_hdr = first(filter(x->sectionname(x)==".eh_frame_hdr",ELF.Sections(mod)))
-    eh_frame = first(filter(x->sectionname(x)==".eh_frame",ELF.Sections(mod)))
-    hdrref = CallFrameInfo.EhFrameRef(eh_frame_hdr, eh_frame)
-    CallFrameInfo.search_fde_offset(hdrref, Int(modrel)-Int(sectionoffset(eh_frame_hdr)))
+    slide = 0
+    eh_frame = first(filter(x->sectionname(x)==".eh_frame",ELF.Sections(handle(mod))))
+    if isa(mod, Module) && !isempty(mod.FDETab)
+        tab = mod.FDETab
+    else
+        eh_frame_hdr = first(filter(x->sectionname(x)==".eh_frame_hdr",ELF.Sections(handle(mod))))
+        tab = CallFrameInfo.EhFrameRef(eh_frame_hdr, eh_frame)
+        modrel = Int(modrel)-Int(sectionoffset(eh_frame_hdr))
+        slide = sectionoffset(eh_frame_hdr) - sectionoffset(eh_frame)
+    end
+    CallFrameInfo.search_fde_offset(eh_frame, tab, modrel, slide)
 end
 
-modulerel(mod, base, ip) = ip - base
+function modulerel(mod, base, ip)
+    ret = (ip - base)
+end
 function frame(s, modules, r)
-    base, mod = find_module(modules, ip(r))
-    modrel = UInt(modulerel(mod, base, ip(r)))
+    base, mod = find_module(modules, UInt(ip(r)))
+    modrel = UInt(modulerel(mod, base, UInt(ip(r))))
     fde = find_fde(mod, modrel)
     cie = realize_cie(fde)
     # Compute CFA
-    target_delta = modrel - initial_loc(fde, cie)
-    # out = IOContext(STDOUT, :reg_map => Main.X86_64.dwarf_numbering)
-    # CallFrameInfo.dump_program(out, cie); println(out)
-    # CallFrameInfo.dump_program(out, fde, cie = cie)
+    loc = initial_loc(fde, cie)
+    target_delta = modrel - loc
+    if handle(mod).file.header.e_type == ELF.ET_REL
+        eh_frame = first(filter(x->sectionname(x) == ".eh_frame",ELF.Sections(handle(mod))))
+        target_delta = UInt(ip(r)) - (loc + deref(eh_frame).sh_addr - sectionoffset(eh_frame))
+    end
+    @assert target_delta < CallFrameInfo.fde_range(fde, cie)
+    # out = IOContext(STDOUT, :reg_map => Gallium.X86_64.dwarf_numbering)
+    # drs = CallFrameInfo.RegStates()
+    # CallFrameInfo.dump_program(out, cie, target = UInt(target_delta), rs = drs); println(out)
+    # CallFrameInfo.dump_program(out, fde, cie = cie, target = UInt(target_delta), rs = drs)
     rs = CallFrameInfo.evaluate_program(fde, UInt(target_delta), cie = cie)
     local cfa_addr
     if isa(rs.cfa, Tuple{CallFrameInfo.RegNum,Int})
-        cfa_addr = convert(Int, get_dwarf(r, Int(rs.cfa[1])) + rs.cfa[2])
+        cfa_addr = RemotePtr{Void}(convert(Int, get_dwarf(r, Int(rs.cfa[1])) + rs.cfa[2]))
     elseif isa(rs.cfa, CallFrameInfo.Undef)
         error("CFA may not be undef")
     else
@@ -65,18 +79,17 @@ function symbolicate(modules, ip)
     fde = find_fde(mod, modrel)
     cie = realize_cie(fde)
     fbase = initial_loc(fde, cie)
+    sections = ELF.Sections(handle(mod))
+    if handle(mod).file.header.e_type == ELF.ET_REL
+        eh_frame = first(filter(x->sectionname(x) == ".eh_frame",sections))
+        fbase += deref(eh_frame).sh_addr - sectionoffset(eh_frame)
+    end
     local syms
-    sections = ELF.Sections(mod)
     secs = collect(filter(x->sectionname(x) == ".symtab",sections))
     isempty(secs) && (secs = collect(filter(x->sectionname(x) == ".dynsym",sections)))
     syms = ELF.Symbols(secs[1])
     idx = findfirst(syms) do x
-        value = deref(x).st_value
-        shndx = deref(x).st_shndx
-        if shndx != ELF.SHN_UNDEF && shndx < ELF.SHN_LORESERVE
-            sec = sections[shndx]
-            value += deref(sec).sh_addr - sectionoffset(sec)
-        end
+        value = ELF.symbolvalue(x, sections)
         value == fbase
     end
     idx == 0 && return "???"
@@ -109,7 +122,8 @@ function unwind_step(s, modules, r)
     invalidate_regs!(new_registers)
     cfa, rs, cie, delta = try
         frame(s, modules, r)
-    catch
+    catch e
+        rethrow(e)
         return (false, r)
     end
 
@@ -123,7 +137,7 @@ function unwind_step(s, modules, r)
     end=#
     
     # By definition, the next frame's stack pointer is our CFA
-    set_sp!(new_registers, cfa)
+    set_sp!(new_registers, UInt(cfa))
     isa(rs[cie.return_reg], CallFrameInfo.Undef) && return (false, r)
     # Find current frame's return address, (i.e. the new frame's ip)
     set_ip!(new_registers, fetch_cfi_value(s, r, rs[cie.return_reg], cfa))
@@ -132,6 +146,7 @@ function unwind_step(s, modules, r)
         reg == cie.return_reg && continue
         set_dwarf!(new_registers, reg, fetch_cfi_value(s, r, resolution, cfa))
     end
+    UInt(ip(new_registers)) == 0 &&  return (false, r)
     (true, new_registers)
 end
 

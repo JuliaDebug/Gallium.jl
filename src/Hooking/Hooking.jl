@@ -1,5 +1,9 @@
 module Hooking
 
+using Gallium
+using Gallium: X86_64, Registers
+using Gallium.Registers: ip
+
 typealias MachTask Ptr{Void}
 typealias KernReturn UInt32
 
@@ -103,30 +107,6 @@ end
 
 include("backtraces.jl")
 
-# Register save implementation
-
-@osx_only const RegisterMap = Dict(
-    :rsp => 8,
-    :rip => 17
-)
-
-@linux_only const RegisterMap = Dict(
-    :rip => div(UC_MCONTEXT_GREGS_RIP,sizeof(Ptr{Void}))+1,
-    :rsp => div(UC_MCONTEXT_GREGS_RSP,sizeof(Ptr{Void}))+1
-)
-
-@osx_only const RC_SIZE = 20*8
-@linux_only const RC_SIZE = 0xb0
-
-immutable RegisterContext
-    data::Array{UInt}
-end
-RegisterContext() = RegisterContext(Array(UInt,RC_SIZE))
-Base.copy(RC::RegisterContext) = RegisterContext(copy(RC.data))
-get_ip(RC::RegisterContext) = RC.data[RegisterMap[:rip]]-14
-
-# Actual hooking
-
 immutable Hook
     addr::Ptr{Void}
     orig_data::Vector{UInt8}
@@ -142,13 +122,16 @@ end
 
 # The text section of jumpto-x86_64-macho.o
 @osx_only const resume_length = 91
-@linux_only const resume_length = 0x71
+@linux_only const resume_length = 0x5b
 
 # Split this out to avoid constructing a gc frame in the callback directly
 @noinline function _callback(x::Ptr{Void})
-    RC = RegisterContext(reinterpret(UInt,
-        copy(pointer_to_array(convert(Ptr{UInt8}, x), (RC_SIZE,), false))))
-    hook_addr = RC.data[RegisterMap[:rip]]-14
+    RC = X86_64.BasicRegs()
+    regs = pointer_to_array(Ptr{UInt64}(x), (length(X86_64.basic_regs),), false)
+    for i in X86_64.basic_regs
+        set_dwarf!(RC, i, RegisterValue{UInt64}(regs[i+1], (-1%UInt64)))
+    end
+    hook_addr = UInt(ip(RC))-14
     hook = hooks[reinterpret(Ptr{Void},hook_addr)]
     ret = hook.callback(hook, copy(RC))
     if isa(ret, Deopt)
@@ -177,8 +160,9 @@ end
     # invalidate instruction cache here if ever ported to other
     # architectures
 
+    RC = UInt64[get_dwarf(RC, i)[] for i in X86_64.basic_regs]
     ptr = convert(Ptr{Void},pointer(callback_rwx))::Ptr{Void}
-    ptr, pointer(RC.data)::Ptr{UInt64}
+    ptr, Ptr{UInt64}(pointer(RC))::Ptr{UInt64}
 end
 function callback(x::Ptr{Void})
     ptr, data = _callback(x)
@@ -195,7 +179,7 @@ function __init__()
     global callback_rwx
     global resume_instructions
     here = dirname(@__FILE__)
-    function resume(RC::RegisterContext)
+    function resume(RC)
         ccall((:hooking_jl_jumpto, hooking_lib),Void,(Ptr{UInt8},),pointer(RC.data))
     end
     theresume = cglobal((:hooking_jl_jumpto, hooking_lib), Ptr{UInt8})

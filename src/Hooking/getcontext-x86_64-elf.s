@@ -4,8 +4,6 @@
 # the address of the stack buffer as that function's first
 # argument.
 
-#include "x86-64-mregs.inc"
-
 .text
 .align 4,0x90
 .globl hooking_jl_savecontext

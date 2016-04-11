@@ -1,3 +1,4 @@
+__precompile__()
 module Gallium
     using ASTInterpreter
     using Base.Meta
@@ -7,9 +8,19 @@ module Gallium
     using MachO
     using AbstractTrees
     import ASTInterpreter: @enter
+
+    # Debugger User Interface
     export breakpoint, @enter, @breakpoint
 
+    include("remote.jl")
+    include("registers.jl")
+    include("x86_64/registers.jl")
+    include("modules.jl")
+    include("unwind.jl")
     include("Hooking/Hooking.jl")
+
+    using .Registers: ip, get_dwarf
+
 
     immutable JuliaStackFrame
         oh
@@ -115,7 +126,7 @@ module Gallium
 
     # Move this somewhere better
     function ObjFileBase.getSectionLoadAddress(LOI::Dict, sec)
-        return LOI[symbol(bytestring(deref(sec).sectname))]
+        return LOI[symbol(sectionname(sec))]
     end
 
     function search_linetab(linetab, ip)
@@ -133,6 +144,22 @@ module Gallium
         last_entry
     end
 
+    function rec_backtrace(RC)
+        ips = Array(UInt64, 0)
+        rec_backtrace(RC->push!(ips,ip(RC)), RC)
+        ips
+    end
+
+    global active_modules = LazyLocalModules()
+    function rec_backtrace(callback, RC)
+        callback(RC)
+        while true
+            (ok, RC) = Unwinder.unwind_step(LocalSession(), active_modules, RC)
+            ok || break
+            callback(RC)
+        end
+    end
+
     # Validate that an address is a valid location in the julia heap
     function heap_validate(ptr)
         typeptr = Ptr{Ptr{Void}}(ptr-sizeof(Ptr))
@@ -145,139 +172,124 @@ module Gallium
 
     function stackwalk(RC)
         stack = Any[]
-        Hooking.rec_backtrace(RC) do cursor
-            ip = reinterpret(Ptr{Void},Hooking.get_ip(cursor))
+        rec_backtrace(RC) do RC
+            theip = reinterpret(Ptr{Void},UInt(ip(RC)))
             ipinfo = (ccall(:jl_lookup_code_address, Any, (Ptr{Void}, Cint),
-              ip-1, 0))
+              theip-1, 0))
             fromC = ipinfo[7]
             if fromC
-                push!(stack, CStackFrame(Hooking.get_ip(cursor)))
+                push!(stack, CStackFrame(theip))
             else
-                arr = ccall(:jl_get_dobj_data, Any, (Ptr{Void},), ip)
-                data = copy(arr)
-                buf = IOBuffer(data, true, true)
-                h = readmeta(buf)
+                (sstart, h) = find_module(active_modules, theip)
                 tlinfo = ipinfo[6]::LambdaInfo
                 env = ASTInterpreter.prepare_locals(tlinfo)
                 copy!(env.sparams, tlinfo.sparam_vals)
-                sstart = ccall(:jl_get_section_start, UInt64, (Ptr{Void},), ip-1)
                 variables = Dict()
                 line = 0
                 file = ""
+                dbgs = debugsections(handle(h))
                 try
-                    dbgs = debugsections(h)
-                    try
-                        lip = UInt(ip)-sstart-1
-                        if isa(h, ELF.ELFHandle)
-                            if h.file.header.e_type != ELF.ET_DYN
-                                ELF.relocate!(buf, h)
-                            end
-                        else
-                            LOI = Dict(:__text => sstart,
-                                :__debug_str=>0) #This one really shouldn't be necessary
-                            MachO.relocate!(buf, h; LOI=LOI)
-                            # TODO: Unify this
-                            if MachO.readheader(h).filetype != MachO.MH_DSYM
-                                lip = UInt(ip)-1
-                            end
-                        end
-                        cu = DWARF.searchcuforip(dbgs, lip)
-                        sp = DWARF.searchspforip(cu, lip)
-                        # Process Compilation Unit to get line table
-                        line_offset = DWARF.extract_attribute(cu, DWARF.DW_AT_stmt_list)
-                        line_offset = isnull(line_offset) ? 0 : convert(UInt, get(line_offset).value)
-                        seek(dbgs.debug_line, line_offset)
-                        linetab = DWARF.LineTableSupport.LineTable(h.io)
-                        entry = search_linetab(linetab, lip)
-                        line = entry.line
-                        fileentry = linetab.header.file_names[entry.file]
-                        if fileentry.dir_idx == 0
-                            file = Base.find_source_file(fileentry.name)
-                        else
-                            file = joinpath(linetab.header.include_directories[fileentry.dir_idx],
-                                fileentry.name)
-                        end
+                    lip = UInt(theip)-sstart-1
+                    if (isa(handle(h), ELF.ELFHandle) && handle(h).file.header.e_type == ELF.ET_REL) ||
+                        (isa(handle(h), MachO.MachOHandle) && MachO.readheader(handle(h)).filetype != MachO.MH_DSYM)
+                        lip = UInt(theip)-1
+                    end
+                    cu = DWARF.searchcuforip(dbgs, lip)
+                    sp = DWARF.searchspforip(cu, lip)
+                    # Process Compilation Unit to get line table
+                    line_offset = DWARF.extract_attribute(cu, DWARF.DW_AT_stmt_list)
+                    line_offset = isnull(line_offset) ? 0 : convert(UInt, get(line_offset).value)
+                    seek(dbgs.debug_line, line_offset)
+                    linetab = DWARF.LineTableSupport.LineTable(handle(h).io)
+                    entry = search_linetab(linetab, lip)
+                    line = entry.line
+                    fileentry = linetab.header.file_names[entry.file]
+                    if fileentry.dir_idx == 0
+                        file = Base.find_source_file(fileentry.name)
+                    else
+                        file = joinpath(linetab.header.include_directories[fileentry.dir_idx],
+                            fileentry.name)
+                    end
 
-                        # Process Subprogram to extract local variables
-                        strtab = ObjFileBase.load_strtab(dbgs.debug_str)
-                        vartypes = Dict{Symbol,Type}()
-                        if tlinfo.slottypes === nothing
-                            for name in tlinfo.slotnames
-                                vartypes[name] = Any
-                            end
-                        else
-                            for (name, ty) in zip(tlinfo.slotnames, tlinfo.slottypes)
-                                vartypes[name] = ty
-                            end
+                    # Process Subprogram to extract local variables
+                    strtab = ObjFileBase.load_strtab(dbgs.debug_str)
+                    vartypes = Dict{Symbol,Type}()
+                    if tlinfo.slottypes === nothing
+                        for name in tlinfo.slotnames
+                            vartypes[name] = Any
                         end
-                        fbreg = DWARF.extract_attribute(sp, DWARF.DW_AT_frame_base)
-                        # Array is for DWARF 2 support.
-                        fbreg = isnull(fbreg) ? -1 :
-                            (isa(get(fbreg).value, Array) ? get(fbreg).value[1] : get(fbreg).value.expr[1]) - DWARF.DW_OP_reg0
-                        variables = Dict()
-                        for vardie in (filter(children(sp)) do child
-                                    tag = DWARF.tag(child)
-                                    tag == DWARF.DW_TAG_formal_parameter ||
-                                    tag == DWARF.DW_TAG_variable
-                                end)
-                            name = DWARF.extract_attribute(vardie,DWARF.DW_AT_name)
-                            loc = DWARF.extract_attribute(vardie,DWARF.DW_AT_location)
-                            (isnull(name) || isnull(loc)) && continue
-                            name = symbol(bytestring(get(name).value,StrTab(dbgs.debug_str)))
-                            loc = get(loc)
-                            if loc.spec.form == DWARF.DW_FORM_exprloc
-                                sm = DWARF.Expressions.StateMachine{typeof(loc.value).parameters[1]}()
-                                function getreg(reg)
-                                    if reg == DWARF.DW_OP_fbreg
-                                        (fbreg == -1) && error("fbreg requested but not found")
-                                        Hooking.get_reg(cursor, fbreg)
-                                    else
-                                        Hooking.get_reg(cursor, reg)
-                                    end
+                    else
+                        for (name, ty) in zip(tlinfo.slotnames, tlinfo.slottypes)
+                            vartypes[name] = ty
+                        end
+                    end
+                    fbreg = DWARF.extract_attribute(sp, DWARF.DW_AT_frame_base)
+                    # Array is for DWARF 2 support.
+                    fbreg = isnull(fbreg) ? -1 :
+                        (isa(get(fbreg).value, Array) ? get(fbreg).value[1] : get(fbreg).value.expr[1]) - DWARF.DW_OP_reg0
+                    variables = Dict()
+                    for vardie in (filter(children(sp)) do child
+                                tag = DWARF.tag(child)
+                                tag == DWARF.DW_TAG_formal_parameter ||
+                                tag == DWARF.DW_TAG_variable
+                            end)
+                        name = DWARF.extract_attribute(vardie,DWARF.DW_AT_name)
+                        loc = DWARF.extract_attribute(vardie,DWARF.DW_AT_location)
+                        (isnull(name) || isnull(loc)) && continue
+                        name = symbol(bytestring(get(name).value,StrTab(dbgs.debug_str)))
+                        loc = get(loc)
+                        if loc.spec.form == DWARF.DW_FORM_exprloc
+                            sm = DWARF.Expressions.StateMachine{typeof(loc.value).parameters[1]}()
+                            function getreg(reg)
+                                if reg == DWARF.DW_OP_fbreg
+                                    (fbreg == -1) && error("fbreg requested but not found")
+                                    get_dwarf(RC, fbreg)
+                                else
+                                    get_dwarf(RC, reg)
                                 end
-                                getword(addr) = unsafe_load(reinterpret(Ptr{UInt64}, addr))
-                                addr_func(x) = x
-                                val = DWARF.Expressions.evaluate_simple_location(
-                                    sm, loc.value.expr, getreg, getword, addr_func, :NativeEndian)
-                                variables[name] = :found
-                                if isa(val, DWARF.Expressions.MemoryLocation)
-                                    if isbits(vartypes[name])
-                                        val = unsafe_load(reinterpret(Ptr{vartypes[name]},
-                                            val.i))
-                                    else
-                                        ptr = reinterpret(Ptr{Void}, val.i)
-                                        if ptr == C_NULL
+                            end
+                            getword(addr) = unsafe_load(reinterpret(Ptr{UInt64}, addr))
+                            addr_func(x) = x
+                            val = DWARF.Expressions.evaluate_simple_location(
+                                sm, loc.value.expr, getreg, getword, addr_func, :NativeEndian)
+                            variables[name] = :found
+                            if isa(val, DWARF.Expressions.MemoryLocation)
+                                if isbits(vartypes[name])
+                                    val = unsafe_load(reinterpret(Ptr{vartypes[name]},
+                                        val.i))
+                                else
+                                    ptr = reinterpret(Ptr{Void}, val.i)
+                                    if ptr == C_NULL
+                                        val = Nullable{Ptr{vartypes[name]}}()
+                                    elseif heap_validate(ptr)
+                                        val = unsafe_pointer_to_objref(ptr)
+                                    # This is a heuristic. Should update to check
+                                    # whether the variable is declared as jl_value_t
+                                    elseif Hooking.mem_validate(ptr, sizeof(Ptr{Void}))
+                                        ptr2 = unsafe_load(Ptr{Ptr{Void}}(ptr))
+                                        if ptr2 == C_NULL
                                             val = Nullable{Ptr{vartypes[name]}}()
-                                        elseif heap_validate(ptr)
-                                            val = unsafe_pointer_to_objref(ptr)
-                                        # This is a heuristic. Should update to check
-                                        # whether the variable is declared as jl_value_t
-                                        elseif Hooking.mem_validate(ptr, sizeof(Ptr{Void}))
-                                            ptr2 = unsafe_load(Ptr{Ptr{Void}}(ptr))
-                                            if ptr2 == C_NULL
-                                                val = Nullable{Ptr{vartypes[name]}}()
-                                            elseif heap_validate(ptr2)
-                                                val = unsafe_pointer_to_objref(ptr2)
-                                            end
+                                        elseif heap_validate(ptr2)
+                                            val = unsafe_pointer_to_objref(ptr2)
                                         end
                                     end
-                                    variables[name] = :available
-                                elseif isa(val, DWARF.Expressions.RegisterLocation)
-                                    # The value will generally be in the low bits of the
-                                    # register. This should give the appropriate value
-                                    val = reinterpret(vartypes[name],[getreg(val.i)])[]
-                                    variables[name] = :available
                                 end
-                                varidx = findfirst(tlinfo.slotnames, name)
-                                if varidx != 0
-                                    env.locals[varidx] = Nullable{Any}(val)
-                                end
+                                variables[name] = :available
+                            elseif isa(val, DWARF.Expressions.RegisterLocation)
+                                # The value will generally be in the low bits of the
+                                # register. This should give the appropriate value
+                                val = reinterpret(vartypes[name],[getreg(val.i)])[]
+                                variables[name] = :available
+                            end
+                            varidx = findfirst(tlinfo.slotnames, name)
+                            if varidx != 0
+                                env.locals[varidx] = Nullable{Any}(val)
                             end
                         end
-                    catch err
-                        @show err
-                        Base.show_backtrace(STDOUT, catch_backtrace())
                     end
+                catch err
+                    @show err
+                    Base.show_backtrace(STDOUT, catch_backtrace())
                 end
                 # process SP.variables here
                 #h = readmeta(IOBuffer(data))

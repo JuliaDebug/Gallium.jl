@@ -31,22 +31,37 @@ module X86_64
       $(Expr(:block, (
         :($(dwarf_numbering[i]) :: RegT) for i in basic_regs
       )...))
+      BasicRegs() = new()
   end
   Registers.ip(regs::RegisterSet) = regs.rip
-  Registers.set_ip!(reg::RegisterSet, ip) = regs.rip = ip
-  Registers.set_sp!(reg::RegisterSet, sp) = regs.rip = sp
+  Registers.set_ip!(regs::RegisterSet, ip) = regs.rip = RegisterValue{UInt64}(ip)
+  Registers.set_sp!(regs::RegisterSet, sp) = regs.rsp = RegisterValue{UInt64}(sp)
   function Registers.invalidate_regs!(regs::BasicRegs)
       for fieldi = 1:nfields(regs)
-          setfield(regs, i, Registers.invalidated(getfield(regs, i)))
+          setfield!(regs, fieldi, Registers.invalidated(getfield(regs, fieldi)))
+      end
+  end
+  
+  function Base.copy(regs::BasicRegs)
+      ret = BasicRegs()
+      for i = 1:nfields(regs)
+          setfield!(ret, i, getfield(regs, i))
+      end
+      ret
+  end
+  
+  function Base.show(io::IO, regs::BasicRegs)
+      for (i,reg) in enumerate(fieldnames(typeof(regs)))
+          println(io," "^(3-length(string(reg))),reg," ",getfield(regs, i))
       end
   end
 
   function Registers.set_dwarf!(regs::BasicRegs, reg, value)
-      (reg < endof(basic_regs)) && (setfield(regs, reg, value))
+      (reg <= endof(basic_regs)) && setfield!(regs, reg+1, RegisterValue{UInt64}(value))
   end
 
   function Registers.get_dwarf(regs::BasicRegs, reg)
-      (reg < endof(basic_regs)) ? getfield(regs, reg) :
+      (reg <= endof(basic_regs)) ? getfield(regs, reg+1) :
         RegisterValue{UInt64}(0, 0)
   end
 
