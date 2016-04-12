@@ -108,15 +108,13 @@ end
             base = ccall(:_dyld_get_image_vmaddr_slide, UInt, (UInt32,), idx)
             fname = bytestring(
                 ccall(:_dyld_get_image_name, Ptr{UInt8}, (UInt32,), idx))
-            # these are fat, skip for now
-            (contains(fname, "libSystem") ||
-                contains(fname, "/System/Library/") ||
-                contains(fname, "libgcc") ||
-                # Hooking is odd (null length fde), need to investigate
-                contains(fname, "hooking.dylib") ||
-                startswith(fname, "/usr/lib")) &&
-                    continue
+            # hooking is weird
+            contains(fname, "hooking.dylib") &&
+                continue
             h = readmeta(IOBuffer(open(read, fname)))
+            if isa(h, MachO.FatMachOHandle)
+                h = h[findfirst(arch->arch.cputype == MachO.CPU_TYPE_X86_64, h.archs)]
+            end
             # Do not record the dynamic linker in our module list
             # Also skip the executable for now
             ft = readheader(h).filetype
