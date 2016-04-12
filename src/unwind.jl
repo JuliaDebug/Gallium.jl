@@ -22,7 +22,7 @@ end
 
 function find_fde(mod, modrel)
     slide = 0
-    eh_frame = first(filter(x->sectionname(x)==mangle_sname(handle(mod),"eh_frame"),Sections(handle(mod))))
+    eh_frame = Gallium.find_ehframes(handle(mod))[]
     if isa(mod, Module) && !isempty(mod.FDETab)
         tab = mod.FDETab
         return CallFrameInfo.search_fde_offset(eh_frame, tab, modrel, slide)
@@ -37,13 +37,38 @@ function find_fde(mod, modrel)
     end
 end
 
+function probably_in_entrypoint(h, ip)
+    start = Gallium.X86_64.BasicRegs(deref(first(filter(x->isa(deref(x),MachO.thread_command),LoadCmds(h))))).rip[]
+    start -= Gallium.first_actual_segment(h).vmaddr
+    # Default OS X _start is 63 bytes
+    start <= ip <= start+63
+end
+
+function entry_cfa(mod, r)
+    rs = DWARF.CallFrameInfo.RegStates()
+    regs = Gallium.X86_64.inverse_dwarf
+    cfa_addr = RemotePtr{Void}(get_dwarf(r, regs[:rbp])[])
+    rs[regs[:rip]] = DWARF.CallFrameInfo.Offset(0x0, false)
+    cfa_addr, rs, DWARF.CallFrameInfo.CIE(0,0,0,regs[:rip],UInt8[]), 0
+end
+
 function modulerel(mod, base, ip)
     ret = (ip - base)
 end
 function frame(s, modules, r)
     base, mod = find_module(modules, UInt(ip(r)))
     modrel = UInt(modulerel(mod, base, UInt(ip(r))))
-    loc, fde = find_fde(mod, modrel)
+    loc, fde = try
+        find_fde(mod, modrel)
+    catch e
+        # As a special case, if we're in a MachO executable's entry point,
+        # we probably don't have unwind info. TODO: Remove this once we support
+        # comapact unwind infom which the entry point does have.
+        if isa(handle(mod), MachO.MachOHandle) && readheader(handle(mod)).filetype == MachO.MH_EXECUTE
+            probably_in_entrypoint(handle(mod), modrel) && return entry_cfa(mod, r)
+        end
+        rethrow(e)
+    end
     cie = realize_cie(fde)
     # Compute CFA
     target_delta = modrel - loc - 1

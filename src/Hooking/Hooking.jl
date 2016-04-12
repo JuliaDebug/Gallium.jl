@@ -123,7 +123,7 @@ immutable Deopt
 end
 
 # The text section of jumpto-x86_64-macho.o
-@osx_only const resume_length = 91
+@osx_only const resume_length = 0x5b
 @linux_only const resume_length = 0x5b
 
 function hook_asm_template(addr)
@@ -234,7 +234,7 @@ end
 function allow_writing(f, region)
     # On OS X, make sure that the page is mapped as COW
     @osx_only mach_check(
-        mach_vm_protect(region, VM_PROT_READ | VM_PROT_WRITE))
+        mach_vm_protect(region, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE))
     @linux_only mprotect(region, PROT_READ | PROT_WRITE | PROT_EXEC)
     f()
     @osx_only mach_check(
@@ -277,7 +277,6 @@ function hook(callback::Function, addr)
         dest[:] = hook_asm
     end
 
-    @show addr
     hooks[addr] = Hook(addr,orig_data,callback)
 end
 

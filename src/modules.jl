@@ -22,6 +22,10 @@ type LazyLocalModules
 end
 LazyLocalModules() = LazyLocalModules(Dict{UInt, Any}(), 0)
 
+function first_actual_segment(h)
+    deref(first(filter(x->isa(deref(x),MachO.segment_commands)&&(segname(x)!="__PAGEZERO"), LoadCmds(handle(h)))))
+end
+
 function _find_module(modules, ip)
     for (base, h) in modules
         (base, ip) = (UInt(base), UInt(ip))
@@ -33,7 +37,7 @@ function _find_module(modules, ip)
             phs = ELF.ProgramHeaders(handle(h))
             sz = first(filter(x->x.p_type == ELF.PT_LOAD, phs)).p_memsz
         elseif isa(handle(h), MachO.MachOHandle)
-            sz = deref(first(filter(x->isa(deref(x),MachO.segment_commands), LoadCmds(handle(h))))).vmsize
+            sz = first_actual_segment(h).vmsize
         end
         if base <= ip <= base + sz
             return (base, h)
@@ -53,7 +57,7 @@ base is the remote address of the text section
 """
 function make_fdetab(base, mod)
     FDETab = Vector{Tuple{Int,UInt}}()
-    eh_frame = first(filter(x->sectionname(x)==mangle_sname(mod,"eh_frame"),Sections(mod)))
+    eh_frame = find_ehframes(mod)[]
     for fde in FDEIterator(eh_frame)
         # Make this location, relative to base. Note that base means something different,
         # depending on whether we're isrelocatable or not. If we are, base is the load address
@@ -89,6 +93,13 @@ end
     debugh
 end
 
+find_ehframes(sects::ObjFileBase.Sections) = collect(filter(x->sectionname(x)==mangle_sname(handle(sects),"eh_frame"),sects))
+find_ehframes(h::ELF.ELFHandle) = find_ehframes(Sections(h))
+function find_ehframes(h::MachO.MachOHandle)
+    mapreduce(x->find_ehframes(Sections(x)), vcat,
+        filter(x->isa(deref(x), MachO.segment_commands), LoadCmds(h)))
+end
+
 @osx_only function update_shlibs!(modules)
     nactuallibs = ccall(:_dyld_image_count, UInt32, ())
     if modules.nsharedlibs != nactuallibs
@@ -109,14 +120,16 @@ end
             # Do not record the dynamic linker in our module list
             # Also skip the executable for now
             ft = readheader(h).filetype
-            if ft == MachO.MH_DYLINKER || ft == MachO.MH_EXECUTE
+            if ft == MachO.MH_DYLINKER
                 continue
             end
             # For now, don't record shared libraries for which we only
             # have compact unwind info.
-            ehfs = collect(filter(x->sectionname(x)==mangle_sname(h,"eh_frame"),Sections(h)))
+            ehfs = find_ehframes(h)
             length(collect(ehfs)) == 0 && continue
             fdetab = make_fdetab(base, h)
+            vmaddr = first_actual_segment(h).vmaddr
+            base += vmaddr
             modules.modules[base] = Module(h, obtain_dsym(fname, h), fdetab)
         end
         modules.nsharedlibs = nactuallibs
@@ -136,7 +149,9 @@ function find_module(modules::LazyLocalModules, ip)
         if update_shlibs!(modules)
             return find_module(modules, ip)
         end
-        buf = IOBuffer(copy(ccall(:jl_get_dobj_data, Any, (UInt,), ip)), true, true)
+        data = ccall(:jl_get_dobj_data, Any, (UInt,), ip)
+        @assert data != nothing
+        buf = IOBuffer(copy(data), true, true)
         h = readmeta(buf)
         sstart = ccall(:jl_get_section_start, UInt64, (UInt,), ip-1)
         fdetab = Vector{Tuple{Int,UInt}}()

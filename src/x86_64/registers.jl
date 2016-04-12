@@ -1,14 +1,15 @@
 module X86_64
   using ..Registers
   abstract RegisterSet <: Registers.RegisterSet
+  using MachO
 
   # See zhttp://www.x86-64.org/documentation/abi-0.99.7.pdf
   const dwarf_numbering = Dict{Int, Symbol}(
-  0  => :rax,   1  => :rdx,   2  => :rcx, 
+  0  => :rax,   1  => :rdx,   2  => :rcx,
   3  => :rbx,   4  => :rsi,   5  => :rdi,
-  6  => :rbp,   7  => :rsp,  
+  6  => :rbp,   7  => :rsp,
   (i => symbol("r$i") for i = 8:15)...,
-  16 => :rip,   
+  16 => :rip,
   (17+i => symbol("xmm$i") for i = 0:15)...,
   (33+i => symbol("st$i") for i = 0:7)...,
   (41+i => symbol("mm$i") for i = 0:7)...,
@@ -20,7 +21,7 @@ module X86_64
   66 => :fsw)
   const inverse_dwarf = map(p->p[2]=>p[1], dwarf_numbering)
   const basic_regs = 0:16
-  
+
   const gdb_numbering = Dict{Int, Symbol}(
     (i => dwarf_numbering[i] for i in basic_regs)...)
   const inverse_gdb = map(p->p[2]=>p[1], gdb_numbering)
@@ -41,7 +42,7 @@ module X86_64
           setfield!(regs, fieldi, Registers.invalidated(getfield(regs, fieldi)))
       end
   end
-  
+
   function Base.copy(regs::BasicRegs)
       ret = BasicRegs()
       for i = 1:nfields(regs)
@@ -49,7 +50,7 @@ module X86_64
       end
       ret
   end
-  
+
   function Base.show(io::IO, regs::BasicRegs)
       for (i,reg) in enumerate(fieldnames(typeof(regs)))
           println(io," "^(3-length(string(reg))),reg," ",getfield(regs, i))
@@ -63,6 +64,20 @@ module X86_64
   function Registers.get_dwarf(regs::BasicRegs, reg)
       (reg <= endof(basic_regs)) ? getfield(regs, reg+1) :
         RegisterValue{UInt64}(0, 0)
+  end
+
+  const state_64_regs = [:rax, :rbx, :rcx, :rdx, :rdi, :rsi, :rbp, :rsp,
+    (symbol("r$i") for i = 8:15)..., :rip, #= :rflags, :cs, :fs, :gs =#]
+  function BasicRegs(thread::MachO.thread_command)
+    RC = BasicRegs()
+    if thread.flavor == MachO.x86_THREAD_STATE64
+      for (i,reg) in enumerate(state_64_regs)
+        set_dwarf!(RC, inverse_dwarf[reg], thread.data[i])
+      end
+    else
+      error("Unknown flavor")
+    end
+    return RC
   end
 
 end

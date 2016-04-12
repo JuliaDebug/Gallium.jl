@@ -4,34 +4,34 @@
 .globl _hooking_jl_jumpto
 _hooking_jl_jumpto:
 int $3
-movq    56(%rdi), %rax # rax holds new stack pointer
+movq    UC_MCONTEXT_GREGS_RSP(%rdi), %rax # rax holds new stack pointer
 subq    $16, %rax
 movq    %rax, 56(%rdi)
-movq    32(%rdi), %rbx  # store new rdi on new stack
+movq    UC_MCONTEXT_GREGS_RDI(%rdi), %rbx  # store new rdi on new stack
 movq    %rbx, 0(%rax)
-movq    128(%rdi), %rbx # store new rip on new stack
+movq    UC_MCONTEXT_GREGS_RIP(%rdi), %rbx # store new rip on new stack
 movq    %rbx, 8(%rax)
 # restore all registers
-movq      0(%rdi), %rax
-movq      8(%rdi), %rbx
-movq     16(%rdi), %rcx
-movq     24(%rdi), %rdx
+movq     UC_MCONTEXT_GREGS_RAX(%rdi), %rax
+movq     UC_MCONTEXT_GREGS_RBX(%rdi), %rbx
+movq     UC_MCONTEXT_GREGS_RCX(%rdi), %rcx
+movq     UC_MCONTEXT_GREGS_RDX(%rdi), %rdx
 # restore rdi later
-movq     40(%rdi), %rsi
-movq     48(%rdi), %rbp
+movq     UC_MCONTEXT_GREGS_RSI(%rdi), %rsi
+movq     UC_MCONTEXT_GREGS_RBP(%rdi), %rbp
 # restore rsp later
-movq     64(%rdi), %r8
-movq     72(%rdi), %r9
-movq     80(%rdi), %r10
-movq     88(%rdi), %r11
-movq     96(%rdi), %r12
-movq    104(%rdi), %r13
-movq    112(%rdi), %r14
-movq    120(%rdi), %r15
+movq     UC_MCONTEXT_GREGS_R8(%rdi), %r8
+movq     UC_MCONTEXT_GREGS_R9(%rdi), %r9
+movq     UC_MCONTEXT_GREGS_R10(%rdi), %r10
+movq     UC_MCONTEXT_GREGS_R11(%rdi), %r11
+movq     UC_MCONTEXT_GREGS_R12(%rdi), %r12
+movq     UC_MCONTEXT_GREGS_R13(%rdi), %r13
+movq     UC_MCONTEXT_GREGS_R14(%rdi), %r14
+movq     UC_MCONTEXT_GREGS_R15(%rdi), %r15
 # skip rflags
 # skip cs
 # skip fs
 # skip gs
-movq    56(%rdi), %rsp  # cut back rsp to new location
+movq    UC_MCONTEXT_GREGS_RSP(%rdi), %rsp  # cut back rsp to new location
 pop     %rdi            # rdi was saved here earlier
 ret                     # rip was saved here

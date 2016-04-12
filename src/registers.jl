@@ -24,7 +24,7 @@ module Registers
       @eval ($op)(r::RegisterValue, x::Integer) = RegisterValue(($op)(r.value, x), r.mask)
       @eval ($op)(x::Integer, r::RegisterValue) = RegisterValue(($op)(x, r.value), r.mask)
   end
-  
+
   function Base.show(io::IO, r::RegisterValue)
       value = hex(r[], 2sizeof(r[]))
       print_with_color(:green, io, "0x")
@@ -39,7 +39,7 @@ module Registers
 
   # RegisterSets should ideally support the following operations
   export invalidate_regs!, set_sp!, set_ip!, set_dwarf!, get_dwarf
-  
+
   function ip end
   function invalidate_regs! end
   function set_sp! end
