@@ -339,12 +339,144 @@ module Gallium
         Hooking.Deopt(faddr)
     end
 
+    function _breakpoint_spec(spec::LambdaInfo, method_list)
+        llvmf = ccall(:jl_get_llvmf, Ptr{Void}, (Any, Bool, Bool), spec.specTypes, false, true)
+        @assert llvmf != C_NULL
+        fptr = ccall(:jl_get_llvm_fptr, UInt64, (Ptr{Void},), llvmf)
+        @assert fptr != 0
+        loc = Location(LocalSession(), fptr)
+        (loc in method_list) && return
+        hook(breakpoint_hit, reinterpret(Ptr{Void}, fptr))
+        push!(method_list, loc)
+    end
+
+    function _breakpoint_method(linfo::LambdaInfo, method_list)
+        isdefined(linfo, :specializations) || return
+        for spec in linfo.specializations
+            _breakpoint_spec(spec, method_list)
+        end
+    end
+
+    abstract LocationSource
+    immutable Location
+        vm
+        addr::UInt64
+    end
+    immutable Breakpoint
+        locations::Vector{Location}
+        sources::Vector{LocationSource}
+    end
+    Breakpoint(locations::Vector{Location}) = Breakpoint(locations, LocationSource[])
+    Breakpoint() = Breakpoint(Location[], LocationSource[])
+
+    function Base.show(io::IO, b::Breakpoint)
+        println(io, "Breakpoint Locations:")
+        for loc in b.locations
+            print(io," - ")
+            ipinfo = (ccall(:jl_lookup_code_address, Any, (UInt, Cint),
+                loc.addr, 0))
+            fromC = ipinfo[7]
+            if fromC
+                println(io, "At address ", addr)
+            else
+                linfo = ipinfo[6]::LambdaInfo
+                ASTInterpreter.print_linfo_desc(io, linfo, true)
+                println(io)
+            end
+        end
+        for source in b.sources
+            print(io," + ")
+            println(io,source)
+        end
+    end
+
+    type SpecSource <: LocationSource
+        bp::Breakpoint
+        linfo::LambdaInfo
+        function SpecSource(bp::Breakpoint, linfo::LambdaInfo)
+            !haskey(TracedMethods, linfo) && (TracedMethods[linfo] = Set{SpecSource}())
+            ccall(:jl_trace_linfo, Void, (Any,), linfo)
+            this = new(bp, linfo)
+            push!(TracedMethods[linfo], this)
+            finalizer(this,function (this)
+                pop!(TracedMethods[this.linfo], this)
+                if isempty(TracedMethods[this.linfo])
+                    ccall(:jl_untrace_linfo, Void, (Any,), this.linfo)
+                    delete!(TracedMethods, this.linfo)
+                end
+            end)
+            this
+        end
+    end
+    function fire(s::SpecSource, linfo::LambdaInfo)
+        _breakpoint_spec(linfo, s.bp.locations)
+    end
+
+    const TracedMethods = Dict{LambdaInfo, Set{SpecSource}}()
+    function Base.show(io::IO, source::SpecSource)
+        print(io,"Any specialization of ")
+        ASTInterpreter.print_linfo_desc(io, source.linfo, true)
+    end
+
+    function rebreak_tracer(x::Ptr{Void})
+        linfo = unsafe_pointer_to_objref(x)
+        !haskey(TracedMethods, linfo.def) && return nothing
+        for s in TracedMethods[linfo.def]
+            fire(s, linfo)
+        end
+        nothing
+    end
+
+    function add_meth_to_bp!(bp::Breakpoint, meth::Method)
+        _breakpoint_method(meth.func, bp.locations)
+        push!(bp.sources, SpecSource(bp, meth.func))
+        bp
+    end
+
+    function breakpoint(meth::Method)
+        bp = add_meth_to_bp!(Breakpoint(), meth)
+        push!(breakpoints, bp)
+        bp
+     end
+
+    const breakpoints = Vector{Breakpoint}()
+
+    function list_breakpoints()
+        for (i, bp) in enumerate(breakpoints)
+            println("[$i] $bp")
+        end
+    end
+
     function breakpoint(addr::Ptr{Void})
         hook(breakpoint_hit, addr)
     end
 
     function breakpoint(func, args)
-        hook(breakpoint_hit, func, args)
+        t = Tuple{typeof(func), Base.to_tuple_type(args).parameters...}
+        Base.isleaftype(t) || error("Can only set breakpoints on concrete signatures for now")
+        addr = Hooking.get_function_addr(t)
+        hook(breakpoint_hit, addr)
+        meth = Base._methods_by_ftype(t, 1)[1][3]
+        bp = Breakpoint([Location(LocalSession(),addr)])
+        push!(breakpoints, bp)
+        bp
+    end
+
+    include("breakfile.jl")
+
+    function __init__()
+        ccall(:jl_register_tracer, Void, (Ptr{Void},), cfunction(rebreak_tracer,Void,(Ptr{Void},)))
+        arm_breakfile()
+    end
+
+    function breakpoint(f)
+        bp = Breakpoint()
+        for meth in methods(f)
+            add_meth_to_bp!(bp, meth)
+        end
+        unshift!(bp.sources, MethSource(bp, typeof(f)))
+        push!(breakpoints, bp)
+        bp
     end
 
     macro breakpoint(ex0)

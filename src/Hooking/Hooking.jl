@@ -294,14 +294,15 @@ function hook(thehook::Hook)
     hooks[thehook.addr] = thehook
 end
 
-function get_function_addr(f, t)
-    t = Tuple{typeof(f), Base.to_tuple_type(t).parameters...}
-    llvmf = ccall(:jl_get_llvmf, Ptr{Void}, (Any, Any, Bool, Bool), f, t, false, true)
+function get_function_addr(t)
+    llvmf = ccall(:jl_get_llvmf, Ptr{Void}, (Any, Bool, Bool), t, false, true)
     @assert llvmf != C_NULL
     fptr = ccall(:jl_get_llvm_fptr, UInt64, (Ptr{Void},), llvmf)
     @assert fptr != 0
     reinterpret(Ptr{Void},fptr)
 end
+get_function_addr(f, t) = get_function_addr(Tuple{typeof(f), Base.to_tuple_type(t).parameters...})
+
 
 hook(callback, f, t) = hook(callback, get_function_addr(f, t))
 
