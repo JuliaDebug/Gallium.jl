@@ -47,9 +47,10 @@ function somefunc()
     which_counter += 1
     return nothing
 end
+@test somefunc() == nothing
 Gallium.breakpoint(somefunc)
 @test somefunc() == nothing
-@test which_counter == 1
+@test which_counter == 2
 @test hit_counter == 1
 
 #Now add a method
@@ -59,7 +60,7 @@ function somefunc(x::Int)
     return nothing
 end
 @test somefunc(10) == nothing
-@test which_counter == 11
+@test which_counter == 12
 @test hit_counter == 2
 
 # Now test line-based breakpointing

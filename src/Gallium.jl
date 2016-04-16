@@ -119,6 +119,21 @@ module Gallium
             linetab = DWARF.LineTableSupport.LineTable(handle(dbgs).io)
             (command == "linetabprog" ? DWARF.LineTableSupport.dump_program :
                 DWARF.LineTableSupport.dump_table)(STDOUT, linetab)
+        elseif startswith(command, "bp")
+            subcmds = split(command,' ')[2:end]
+            if subcmds[1] == "list"
+                list_breakpoints()
+            elseif subcmds[1] == "disable"
+                bp = breakpoints[parse(Int,subcmds[2])]
+                disable(bp)
+                println(bp)
+            elseif subcmds[1] == "enable"
+                bp = breakpoints[parse(Int,subcmds[2])]
+                enable(bp)
+                println(bp)
+            end
+        elseif startswith(command, "b")
+            nothing
         end
     end
 
@@ -324,7 +339,7 @@ module Gallium
         thunk = Expr(:->,Expr(:tuple,argnames...),Expr(:block,
             :(linfo = $(quot(linfo))),
             :((loctree, code) = ASTInterpreter.reparse_meth(linfo)),
-            :(__env = ASTInterpreter.prepare_locals(linfo.def)),
+            :(__env = ASTInterpreter.prepare_locals(linfo.def.lambda_template)),
             :(copy!(__env.sparams, linfo.sparam_vals)),
             :(__env.locals[1] = Nullable{Any}()),
             [ :(__env.locals[$i + 1] = Nullable{Any}($(argnames[i]))) for i = 1:length(argnames) ]...,
@@ -393,6 +408,7 @@ module Gallium
         end
         b.disable_new = true
     end
+    remove(b::Breakpoint) = (disable(b); deleteat!(breakpoints, findfirst(breakpoints, b)); nothing)
 
     enable(loc::Location) = hook(breakpoint_hit, Ptr{Void}(loc.addr))
     function enable(b::Breakpoint)
