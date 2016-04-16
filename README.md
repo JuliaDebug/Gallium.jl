@@ -28,6 +28,7 @@ There are several different kinds of breakpoints available:
 - `breakpoint(f, sig)`, e.g. `breakpoint(gcd, Tuple{Int,Int})` will set a breakpoint on entry to all methods matching the given signature.
 - `breakpoint(f)` will set a breakpoint on entry to any method of `f`
 - `breakpoint(file::AbstractString, line)` will set a breakpoint at line `line` in any file that contains `file` as a substring.
+- `breakpoint_on_error()`. Will set a breakpoint that triggers whenever an error is thrown in julia code.
 
 You may use `Gallium.list_breakpoints()` to list all set breakpoints, and `enable(bp), disable(bp), remove(bp)` to enable/disable or remove breakpoints.
 
