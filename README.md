@@ -32,6 +32,11 @@ There are several different kinds of breakpoints available:
 
 You may use `Gallium.list_breakpoints()` to list all set breakpoints, and `enable(bp), disable(bp), remove(bp)` to enable/disable or remove breakpoints.
 
+Finally, any breakpoint can be made conditional by using the `@conditional` macro, e.g.
+```
+@conditional breakpoint(gcd,Tuple{Int,Int}) (a==5)
+```
+
 # Installation
 
 To install Gallium you may simply run
