@@ -16,11 +16,17 @@ function simple(x, y)
     x+y
 end
 
-Gallium.breakpoint(simple, Tuple{Int64, Int64})
+bpsimple = Gallium.breakpoint(simple, Tuple{Int64, Int64})
 @test simple(1, 2) == 3
 @test hit_counter == 1
 @test simple(1.0, 2.0) == 3.0
 @test hit_counter == 1
+Gallium.disable(bpsimple)
+@test simple(1, 2) == 3
+@test hit_counter == 1
+Gallium.enable(bpsimple)
+@test simple(1, 2) == 3
+@test hit_counter == 2
 
 breakmeth(x, y) = x+y
 breakmeth(x::Float64, y::Float64) = x*y
@@ -69,7 +75,7 @@ end
 # Breakpointing based on an abstract signature
 hit_counter = 0
 fabstract(a, b) = a*b
-bp = Gallium.breakpoint(fabstract,Tuple{Integer, Integer})
+abstractbp = Gallium.breakpoint(fabstract,Tuple{Integer, Integer})
 @test fabstract(1, 2) == 2
 @test hit_counter == 1
 @test fabstract(1.0, 2.0) == 2.0
@@ -79,3 +85,18 @@ fabstract(a::Real, b::Real) = a+b
 @test hit_counter == 2
 fabstract(Float32(1.0), Float32(2.0)) == 3.0
 @test hit_counter == 2
+# Specializations being added while the bp is disabled
+Gallium.disable(abstractbp)
+@test fabstract(Int16(1), Int16(2)) == Int16(3)
+@test hit_counter == 2
+Gallium.enable(abstractbp)
+@test fabstract(Int16(1), Int16(2)) == Int16(3)
+@test hit_counter == 3
+# New method being added while the bp is disabled
+Gallium.disable(abstractbp)
+fabstract(x::Int128, y::Int128) = x-y
+@test fabstract(Int128(1), Int128(2)) == Int128(-1)
+@test hit_counter == 3
+Gallium.enable(abstractbp)
+@test fabstract(Int128(1), Int128(2)) == Int128(-1)
+@test hit_counter == 4

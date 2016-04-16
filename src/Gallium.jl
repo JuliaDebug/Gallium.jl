@@ -338,42 +338,23 @@ module Gallium
         faddr = Hooking.get_function_addr(f, Tuple{spectypes...})
         Hooking.Deopt(faddr)
     end
-
-    function _breakpoint_spec(spec::LambdaInfo, method_list)
-        llvmf = ccall(:jl_get_llvmf, Ptr{Void}, (Any, Bool, Bool), spec.specTypes, false, true)
-        @assert llvmf != C_NULL
-        fptr = ccall(:jl_get_llvm_fptr, UInt64, (Ptr{Void},), llvmf)
-        @assert fptr != 0
-        loc = Location(LocalSession(), fptr)
-        (loc in method_list) && return
-        hook(breakpoint_hit, reinterpret(Ptr{Void}, fptr))
-        push!(method_list, loc)
-    end
-
-    function _breakpoint_method(meth::Method, method_list, predicate = linfo->true)
-        isdefined(meth, :specializations) || return
-        for spec in meth.specializations
-            predicate(spec) || continue
-            _breakpoint_spec(spec, method_list)
-        end
-    end
-
     abstract LocationSource
     immutable Location
         vm
         addr::UInt64
     end
-    immutable Breakpoint
-        locations::Vector{Location}
+    type Breakpoint
+        active_locations::Vector{Location}
+        inactive_locations::Vector{Location}
         sources::Vector{LocationSource}
+        disable_new::Bool
     end
-    Breakpoint(locations::Vector{Location}) = Breakpoint(locations, LocationSource[])
-    Breakpoint() = Breakpoint(Location[], LocationSource[])
+    Breakpoint(locations::Vector{Location}) = Breakpoint(locations, Location[], LocationSource[], false)
+    Breakpoint() = Breakpoint(Location[], Location[], LocationSource[], false)
 
-    function Base.show(io::IO, b::Breakpoint)
-        println(io, "Breakpoint Locations:")
-        for loc in b.locations
-            print(io," - ")
+    function print_locations(io::IO, locations, prefix = " - ")
+        for loc in locations
+            print(io,prefix)
             ipinfo = (ccall(:jl_lookup_code_address, Any, (UInt, Cint),
                 loc.addr, 0))
             fromC = ipinfo[7]
@@ -385,9 +366,59 @@ module Gallium
                 println(io)
             end
         end
+    end
+
+    function Base.show(io::IO, b::Breakpoint)
+        if isempty(b.active_locations) && isempty(b.inactive_locations) &&
+            isempty(b.sources)
+            println(io, "Empty Breakpoint")
+            return
+        end
+        println(io, "Locations (+: active, -: inactive, *: source):")
+        !isempty(b.active_locations) && print_locations(io, b.active_locations, " + ")
+        !isempty(b.inactive_locations) && print_locations(io, b.inactive_locations, " - ")
         for source in b.sources
-            print(io," + ")
+            print(io," * ")
             println(io,source)
+        end
+    end
+
+    disable(loc::Location) = unhook(Ptr{Void}(loc.addr))
+    function disable(b::Breakpoint)
+        locs = copy(b.active_locations)
+        empty!(b.active_locations)
+        for loc in locs
+            disable(loc)
+            push!(b.inactive_locations, loc)
+        end
+        b.disable_new = true
+    end
+
+    enable(loc::Location) = hook(breakpoint_hit, Ptr{Void}(loc.addr))
+    function enable(b::Breakpoint)
+        locs = copy(b.inactive_locations)
+        empty!(b.inactive_locations)
+        for loc in locs
+            enable(loc)
+            push!(b.active_locations, loc)
+        end
+        b.disable_new = false
+    end
+
+    function _breakpoint_spec(spec::LambdaInfo, bp)
+        llvmf = ccall(:jl_get_llvmf, Ptr{Void}, (Any, Bool, Bool), spec.specTypes, false, true)
+        @assert llvmf != C_NULL
+        fptr = ccall(:jl_get_llvm_fptr, UInt64, (Ptr{Void},), llvmf)
+        @assert fptr != 0
+        loc = Location(LocalSession(), fptr)
+        add_location(bp, loc)
+    end
+
+    function _breakpoint_method(meth::Method, bp::Breakpoint, predicate = linfo->true)
+        isdefined(meth, :specializations) || return
+        for spec in meth.specializations
+            predicate(spec) || continue
+            _breakpoint_spec(spec, bp)
         end
     end
 
@@ -412,7 +443,7 @@ module Gallium
     end
     function fire(s::SpecSource, linfo::LambdaInfo)
         s.predicate(linfo) || return
-        _breakpoint_spec(linfo, s.bp.locations)
+        _breakpoint_spec(linfo, s.bp)
     end
 
     const TracedMethods = Dict{Method, Set{SpecSource}}()
@@ -432,7 +463,7 @@ module Gallium
 
     function add_meth_to_bp!(bp::Breakpoint, meth::Union{Method, TypeMapEntry}, predicate = linfo->true)
         isa(meth, TypeMapEntry) && (meth = meth.func)
-        _breakpoint_method(meth, bp.locations, predicate)
+        _breakpoint_method(meth, bp, predicate)
         push!(bp.sources, SpecSource(bp, meth, predicate))
         bp
     end
@@ -455,10 +486,18 @@ module Gallium
         hook(breakpoint_hit, addr)
     end
 
+    function add_location(bp, loc)
+        if bp.disable_new
+            push!(bp.inactive_locations, loc)
+        else
+            push!(bp.active_locations, loc)
+            enable(loc)
+        end
+    end
+
     function _breakpoint_concrete(bp, t)
         addr = Hooking.get_function_addr(t)
-        hook(breakpoint_hit, addr)
-        push!(bp.locations, Location(LocalSession(),addr))
+        add_location(bp, Location(LocalSession(),addr))
     end
 
     function breakpoint(func, args)
@@ -469,7 +508,7 @@ module Gallium
             _breakpoint_concrete(bp, t)
         else
             spec_predicate(linfo) = linfo.specTypes <: t
-            meth_predicate(meth) = t <: meth.lambda_template.specTypes
+            meth_predicate(meth) = t <: meth.lambda_template.specTypes || meth.lambda_template.specTypes <: t
             for meth in methods(func, argtt)
                 add_meth_to_bp!(bp, meth, spec_predicate)
             end
