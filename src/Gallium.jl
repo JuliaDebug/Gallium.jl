@@ -10,7 +10,7 @@ module Gallium
     import ASTInterpreter: @enter
 
     # Debugger User Interface
-    export breakpoint, @enter, @breakpoint
+    export breakpoint, @enter, @breakpoint, @conditional
 
     include("remote.jl")
     include("registers.jl")
@@ -330,6 +330,24 @@ module Gallium
         reverse!(stack)
     end
 
+    function matches_condition(interp, condition)
+        condition == nothing && return true
+        if isa(condition, Expr)
+            ok, res = ASTInterpreter.eval_in_interp(interp, condition)
+            !ok && println("Conditional breakpoint errored. Breaking.")
+            return !ok || res
+        else
+            error("Unexpected condition kind")
+        end
+    end
+
+    macro conditional(bp, condition)
+        esc(:(let bp = $bp
+            bp.condition = $(Expr(:quote, condition))
+            bp
+        end))
+    end
+
     function breakpoint_hit(hook, RC)
         stack = stackwalk(RC)
         stacktop = pop!(stack)
@@ -341,7 +359,7 @@ module Gallium
             idx = findfirst(s->isa(s, FileLineSource), bp.sources)
             idx != 0 ? bp.sources[idx].line : linfo.def.line
         end)
-        @show target_line
+        conditions = map(bp->bp.condition, bps)
         thunk = Expr(:->,Expr(:tuple,argnames...),Expr(:block,
             :(linfo = $(quot(linfo))),
             :((loctree, code) = ASTInterpreter.reparse_meth(linfo)),
@@ -355,7 +373,8 @@ module Gallium
             (target_line != linfo.def.line ?
                 :(ASTInterpreter.advance_to_line(interp, $target_line)) :
                 :(nothing)),
-            :(ASTInterpreter.RunDebugREPL(interp)),
+            :(any(c->Gallium.matches_condition(interp,c),$conditions) &&
+                ASTInterpreter.RunDebugREPL(interp)),
             :(ASTInterpreter.finish!(interp)),
             :(return interp.retval::$(linfo.rettype))))
         f = eval(thunk)
