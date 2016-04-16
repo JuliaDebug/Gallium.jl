@@ -336,6 +336,12 @@ module Gallium
         linfo = stacktop.linfo
         argnames = linfo.slotnames[2:linfo.nargs]
         spectypes = linfo.specTypes.parameters[2:end]
+        bps = bps_at_location[Location(LocalSession(),hook.addr)]
+        target_line = minimum(map(bps) do bp
+            idx = findfirst(s->isa(s, FileLineSource), bp.sources)
+            idx != 0 ? bp.sources[idx].line : linfo.def.line
+        end)
+        @show target_line
         thunk = Expr(:->,Expr(:tuple,argnames...),Expr(:block,
             :(linfo = $(quot(linfo))),
             :((loctree, code) = ASTInterpreter.reparse_meth(linfo)),
@@ -346,6 +352,9 @@ module Gallium
             :(interp = ASTInterpreter.enter(linfo,__env,
                 $(collect(filter(x->!isa(x,CStackFrame),stack)));
                     loctree = loctree, code = code)),
+            (target_line != linfo.def.line ?
+                :(ASTInterpreter.advance_to_line(interp, $target_line)) :
+                :(nothing)),
             :(ASTInterpreter.RunDebugREPL(interp)),
             :(ASTInterpreter.finish!(interp)),
             :(return interp.retval::$(linfo.rettype))))
@@ -363,9 +372,10 @@ module Gallium
         inactive_locations::Vector{Location}
         sources::Vector{LocationSource}
         disable_new::Bool
+        condition::Any
     end
-    Breakpoint(locations::Vector{Location}) = Breakpoint(locations, Location[], LocationSource[], false)
-    Breakpoint() = Breakpoint(Location[], Location[], LocationSource[], false)
+    Breakpoint(locations::Vector{Location}) = Breakpoint(locations, Location[], LocationSource[], false, nothing)
+    Breakpoint() = Breakpoint(Location[], Location[], LocationSource[], false, nothing)
 
     function print_locations(io::IO, locations, prefix = " - ")
         for loc in locations
@@ -398,24 +408,37 @@ module Gallium
         end
     end
 
-    disable(loc::Location) = unhook(Ptr{Void}(loc.addr))
+    const bps_at_location = Dict{Location, Set{Breakpoint}}()
+    function disable(bp::Breakpoint, loc::Location)
+        pop!(bps_at_location[loc],bp)
+        if isempty(bps_at_location[loc])
+            unhook(Ptr{Void}(loc.addr))
+            delete!(bps_at_location,loc.addr)
+        end
+    end
     function disable(b::Breakpoint)
         locs = copy(b.active_locations)
         empty!(b.active_locations)
         for loc in locs
-            disable(loc)
+            disable(b, loc)
             push!(b.inactive_locations, loc)
         end
         b.disable_new = true
     end
     remove(b::Breakpoint) = (disable(b); deleteat!(breakpoints, findfirst(breakpoints, b)); nothing)
 
-    enable(loc::Location) = hook(breakpoint_hit, Ptr{Void}(loc.addr))
+    function enable(bp::Breakpoint, loc::Location)
+        if !haskey(bps_at_location, loc)
+            hook(breakpoint_hit, Ptr{Void}(loc.addr))
+            bps_at_location[loc] = Set{Breakpoint}()
+        end
+        push!(bps_at_location[loc], bp)
+    end
     function enable(b::Breakpoint)
         locs = copy(b.inactive_locations)
         empty!(b.inactive_locations)
         for loc in locs
-            enable(loc)
+            enable(b, loc)
             push!(b.active_locations, loc)
         end
         b.disable_new = false
@@ -507,7 +530,7 @@ module Gallium
             push!(bp.inactive_locations, loc)
         else
             push!(bp.active_locations, loc)
-            enable(loc)
+            enable(bp, loc)
         end
     end
 

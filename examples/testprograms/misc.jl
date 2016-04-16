@@ -13,3 +13,13 @@ type averymutabletype
 end
 
 @noinline sinthesin(a::averymutabletype) = sinthesin(a.a)
+
+function testforline(branch)
+    a = gcd(4, 25)
+    if branch
+        b = gcd(7, 21)
+    else
+        b = gcd(6, 24)
+    end
+    gcd(a, b)
+end

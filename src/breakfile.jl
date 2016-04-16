@@ -5,6 +5,10 @@ function compute_nlines(meth)
 end
 
 const filemap = Dict{Symbol, Vector{Method}}()
+function register_meth(meth)
+    !haskey(filemap, meth.file) && (filemap[meth.file] = Vector{Method}())
+    push!(filemap[meth.file], meth)
+end
 function initial_sweep()
     const visited_modules = Set{Core.Module}()
     const workqueue = Set{Core.Module}()
@@ -25,8 +29,7 @@ function initial_sweep()
                 for mt in mts
                     Base.visit(mt) do m
                         m = m.func
-                        !haskey(filemap, m.file) && (filemap[m.file] = Vector{Method}())
-                        push!(filemap[m.file], m)
+                        register_meth(m)
                     end
                 end
             end
@@ -100,6 +103,8 @@ function newmeth_tracer(x::Ptr{Void})
             fire(source, meth)
         end
     end
+    register_meth(meth)
+    nothing
 end
 
 function arm_breakfile()
@@ -107,13 +112,12 @@ function arm_breakfile()
     ccall(:jl_register_newmeth_tracer, Void, (Ptr{Void},), cfunction(newmeth_tracer, Void, (Ptr{Void},)))
 end
 
-function linfos_for_line(linfos, line)
-    ret = Vector{LambdaInfo}()
-    for linfo in linfos
-        linfo.line > line && break
-        @show (linfo.line, compute_nlines(linfo))
-        if line < linfo.line + compute_nlines(linfo)
-            push!(ret, linfo)
+function methods_for_line(meths, line)
+    ret = Vector{Method}()
+    for meth in meths
+        meth.line > line && break
+        if line < meth.line + compute_nlines(meth)
+            push!(ret, meth)
         end
     end
     ret
@@ -121,10 +125,10 @@ end
 
 function breakpoint(file::AbstractString, line::Int)
     bp = Breakpoint()
-    for (fname, linfos) in filemap
+    for (fname, meths) in filemap
         contains(string(fname), file) || continue
-        for linfo in linfos_for_line(linfos, line)
-            add_meth_to_bp!(bp, linfo)
+        for meth in methods_for_line(meths, line)
+            add_meth_to_bp!(bp, meth)
         end
     end
     unshift!(bp.sources, FileLineSource(bp, file, line))
