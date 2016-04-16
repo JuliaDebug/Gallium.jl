@@ -350,9 +350,9 @@ module Gallium
         push!(method_list, loc)
     end
 
-    function _breakpoint_method(linfo::LambdaInfo, method_list)
-        isdefined(linfo, :specializations) || return
-        for spec in linfo.specializations
+    function _breakpoint_method(meth::Method, method_list)
+        isdefined(meth, :specializations) || return
+        for spec in meth.specializations
             _breakpoint_spec(spec, method_list)
         end
     end
@@ -392,17 +392,17 @@ module Gallium
 
     type SpecSource <: LocationSource
         bp::Breakpoint
-        linfo::LambdaInfo
-        function SpecSource(bp::Breakpoint, linfo::LambdaInfo)
-            !haskey(TracedMethods, linfo) && (TracedMethods[linfo] = Set{SpecSource}())
-            ccall(:jl_trace_linfo, Void, (Any,), linfo)
-            this = new(bp, linfo)
-            push!(TracedMethods[linfo], this)
+        meth::Method
+        function SpecSource(bp::Breakpoint, meth::Method)
+            !haskey(TracedMethods, meth) && (TracedMethods[meth] = Set{SpecSource}())
+            ccall(:jl_trace_method, Void, (Any,), meth)
+            this = new(bp, meth)
+            push!(TracedMethods[meth], this)
             finalizer(this,function (this)
-                pop!(TracedMethods[this.linfo], this)
-                if isempty(TracedMethods[this.linfo])
-                    ccall(:jl_untrace_linfo, Void, (Any,), this.linfo)
-                    delete!(TracedMethods, this.linfo)
+                pop!(TracedMethods[this.meth], this)
+                if isempty(TracedMethods[this.meth])
+                    ccall(:jl_untrace_method, Void, (Any,), this.meth)
+                    delete!(TracedMethods, this.meth)
                 end
             end)
             this
@@ -412,7 +412,7 @@ module Gallium
         _breakpoint_spec(linfo, s.bp.locations)
     end
 
-    const TracedMethods = Dict{LambdaInfo, Set{SpecSource}}()
+    const TracedMethods = Dict{Method, Set{SpecSource}}()
     function Base.show(io::IO, source::SpecSource)
         print(io,"Any specialization of ")
         ASTInterpreter.print_linfo_desc(io, source.linfo, true)
@@ -427,13 +427,14 @@ module Gallium
         nothing
     end
 
-    function add_meth_to_bp!(bp::Breakpoint, meth::Method)
-        _breakpoint_method(meth.func, bp.locations)
-        push!(bp.sources, SpecSource(bp, meth.func))
+    function add_meth_to_bp!(bp::Breakpoint, meth::Union{Method, TypeMapEntry})
+        isa(meth, TypeMapEntry) && (meth = meth.func)
+        _breakpoint_method(meth, bp.locations)
+        push!(bp.sources, SpecSource(bp, meth))
         bp
     end
 
-    function breakpoint(meth::Method)
+    function breakpoint(meth::Union{Method, TypeMapEntry})
         bp = add_meth_to_bp!(Breakpoint(), meth)
         push!(breakpoints, bp)
         bp
@@ -471,7 +472,7 @@ module Gallium
 
     function breakpoint(f)
         bp = Breakpoint()
-        for meth in methods(f)
+        Base.visit(methods(f)) do meth
             add_meth_to_bp!(bp, meth)
         end
         unshift!(bp.sources, MethSource(bp, typeof(f)))

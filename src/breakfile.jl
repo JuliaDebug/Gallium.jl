@@ -1,10 +1,10 @@
-function compute_nlines(linfo)
+function compute_nlines(meth)
     maximum(map(x->x.line,
         filter(x->isa(x,LineNumberNode),
-        Base.uncompressed_ast(linfo))))-linfo.line
+        Base.uncompressed_ast(meth.lambda_template))))-meth.line
 end
 
-const filemap = Dict{Symbol, Vector{LambdaInfo}}()
+const filemap = Dict{Symbol, Vector{Method}}()
 function initial_sweep()
     const visited_modules = Set{Core.Module}()
     const workqueue = Set{Core.Module}()
@@ -20,16 +20,20 @@ function initial_sweep()
                 push!(visited_modules, x)
                 continue
             else
-                for m in methods(x)
-                    linfo = m.func
-                    !haskey(filemap, linfo.file) && (filemap[linfo.file] = Vector{LambdaInfo}())
-                    push!(filemap[linfo.file], linfo)
+                mts = methods(x)
+                !isa(mts, Array) && (mts = [mts])
+                for mt in mts
+                    Base.visit(mt) do m
+                        m = m.func
+                        !haskey(filemap, m.file) && (filemap[m.file] = Vector{Method}())
+                        push!(filemap[m.file], m)
+                    end
                 end
             end
         end
     end
     for (k,v) in filemap
-        sort!(v, by = linfo->linfo.line)
+        sort!(v, by = m->m.line)
     end
 end
 
@@ -77,15 +81,15 @@ end
 
 function newmeth_tracer(x::Ptr{Void})
     meth = unsafe_pointer_to_objref(x)::Method
-    fT = meth.sig.parameters[1]
+    fT = meth.lambda_template.specTypes.parameters[1]
     if haskey(TracedTypes, fT)
         for source in TracedTypes[fT]
             fire(source, meth)
         end
     end
     for source in FLBPs
-        contains(string(meth.func.file), string(source.fname)) || continue
-        if meth.func.line <= source.line <= meth.func.line + compute_nlines(meth.func)
+        contains(string(meth.file), string(source.fname)) || continue
+        if meth.line <= source.line <= meth.line + compute_nlines(meth)
             fire(source, meth)
         end
     end
