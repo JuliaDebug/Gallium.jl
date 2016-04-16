@@ -350,9 +350,10 @@ module Gallium
         push!(method_list, loc)
     end
 
-    function _breakpoint_method(meth::Method, method_list)
+    function _breakpoint_method(meth::Method, method_list, predicate = linfo->true)
         isdefined(meth, :specializations) || return
         for spec in meth.specializations
+            predicate(spec) || continue
             _breakpoint_spec(spec, method_list)
         end
     end
@@ -393,10 +394,11 @@ module Gallium
     type SpecSource <: LocationSource
         bp::Breakpoint
         meth::Method
-        function SpecSource(bp::Breakpoint, meth::Method)
+        predicate
+        function SpecSource(bp::Breakpoint, meth::Method, predicate)
             !haskey(TracedMethods, meth) && (TracedMethods[meth] = Set{SpecSource}())
             ccall(:jl_trace_method, Void, (Any,), meth)
-            this = new(bp, meth)
+            this = new(bp, meth, predicate)
             push!(TracedMethods[meth], this)
             finalizer(this,function (this)
                 pop!(TracedMethods[this.meth], this)
@@ -409,13 +411,14 @@ module Gallium
         end
     end
     function fire(s::SpecSource, linfo::LambdaInfo)
+        s.predicate(linfo) || return
         _breakpoint_spec(linfo, s.bp.locations)
     end
 
     const TracedMethods = Dict{Method, Set{SpecSource}}()
     function Base.show(io::IO, source::SpecSource)
-        print(io,"Any specialization of ")
-        ASTInterpreter.print_linfo_desc(io, source.linfo, true)
+        print(io,"Any matching specialization of ")
+        ASTInterpreter.print_linfo_desc(io, source.meth.lambda_template, true)
     end
 
     function rebreak_tracer(x::Ptr{Void})
@@ -427,10 +430,10 @@ module Gallium
         nothing
     end
 
-    function add_meth_to_bp!(bp::Breakpoint, meth::Union{Method, TypeMapEntry})
+    function add_meth_to_bp!(bp::Breakpoint, meth::Union{Method, TypeMapEntry}, predicate = linfo->true)
         isa(meth, TypeMapEntry) && (meth = meth.func)
-        _breakpoint_method(meth, bp.locations)
-        push!(bp.sources, SpecSource(bp, meth))
+        _breakpoint_method(meth, bp.locations, predicate)
+        push!(bp.sources, SpecSource(bp, meth, predicate))
         bp
     end
 
@@ -452,13 +455,26 @@ module Gallium
         hook(breakpoint_hit, addr)
     end
 
-    function breakpoint(func, args)
-        t = Tuple{typeof(func), Base.to_tuple_type(args).parameters...}
-        Base.isleaftype(t) || error("Can only set breakpoints on concrete signatures for now")
+    function _breakpoint_concrete(bp, t)
         addr = Hooking.get_function_addr(t)
         hook(breakpoint_hit, addr)
-        meth = Base._methods_by_ftype(t, 1)[1][3]
-        bp = Breakpoint([Location(LocalSession(),addr)])
+        push!(bp.locations, Location(LocalSession(),addr))
+    end
+
+    function breakpoint(func, args)
+        argtt = Base.to_tuple_type(args)
+        t = Tuple{typeof(func), argtt.parameters...}
+        bp = Breakpoint()
+        if Base.isleaftype(t)
+            _breakpoint_concrete(bp, t)
+        else
+            spec_predicate(linfo) = linfo.specTypes <: t
+            meth_predicate(meth) = t <: meth.lambda_template.specTypes
+            for meth in methods(func, argtt)
+                add_meth_to_bp!(bp, meth, spec_predicate)
+            end
+            push!(bp.sources, MethSource(bp, typeof(func), meth_predicate, spec_predicate))
+        end
         push!(breakpoints, bp)
         bp
     end

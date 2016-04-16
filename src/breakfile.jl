@@ -40,9 +40,11 @@ end
 type MethSource <: LocationSource
     bp::Breakpoint
     fT::Type
-    function MethSource(bp::Breakpoint,fT::Type)
+    meth_predicate
+    spec_predicate
+    function MethSource(bp::Breakpoint,fT::Type, meth_predicate=meth->true, spec_predicate=spec->true)
         !haskey(TracedTypes, fT) && (TracedTypes[fT] = Set{MethSource}())
-        this = new(bp,fT)
+        this = new(bp,fT,meth_predicate,spec_predicate)
         push!(TracedTypes[fT], this)
         finalizer(this,function (this)
             pop!(TracedTypes[this.fT], this)
@@ -55,7 +57,7 @@ type MethSource <: LocationSource
 end
 
 function Base.show(io::IO, source::MethSource)
-    print(io,"Any method added to ",source.fT)
+    print(io,"Any matching method added to ",source.fT)
 end
 const TracedTypes = Dict{Type,Set{MethSource}}()
 
@@ -75,8 +77,13 @@ end
 const FLBPs = Vector{FileLineSource}()
 
 
-function fire(s::Union{MethSource,FileLineSource}, meth)
+function fire(s::FileLineSource, meth)
     add_meth_to_bp!(s.bp, meth)
+end
+
+function fire(s::MethSource, meth)
+    s.meth_predicate(meth) || return
+    add_meth_to_bp!(s.bp, meth, s.spec_predicate)
 end
 
 function newmeth_tracer(x::Ptr{Void})

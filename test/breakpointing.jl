@@ -65,3 +65,17 @@ function testlinebreak()
 end
 @test testlinebreak() == gcd(10, 20)
 @test hit_counter == 1
+
+# Breakpointing based on an abstract signature
+hit_counter = 0
+fabstract(a, b) = a*b
+bp = Gallium.breakpoint(fabstract,Tuple{Integer, Integer})
+@test fabstract(1, 2) == 2
+@test hit_counter == 1
+@test fabstract(1.0, 2.0) == 2.0
+@test hit_counter == 1
+fabstract(a::Real, b::Real) = a+b
+@test fabstract(Int32(1), Int32(2)) == Int32(3)
+@test hit_counter == 2
+fabstract(Float32(1.0), Float32(2.0)) == 3.0
+@test hit_counter == 2
