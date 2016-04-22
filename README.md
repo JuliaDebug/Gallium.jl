@@ -43,6 +43,9 @@ To install Gallium you may simply run
 ```
 Pkg.add("Gallium")
 ```
+
+Gallium currently doesn't work on Windows.
+
 If you wish to run the latest development version, you may also require the development version of Gallium's
 dependencies. The appropriate command to move to these development versions is provided below for convencience.
 However, it is **strongly** recommended that most users make use of the released version instead.
