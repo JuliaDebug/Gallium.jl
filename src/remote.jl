@@ -25,6 +25,7 @@ end
 # but it's present in RR, so is included in this abstract interface for
 # compatibility
 immutable RemoteCodePtr
+    ptr::UInt64
 end
 Base.convert(::Type{UInt64},x::RemoteCodePtr) = x.ptr
 Base.convert(::Type{RemotePtr{Void}},x::RemoteCodePtr) = RemotePtr{Void}(x.ptr)
@@ -32,4 +33,7 @@ Base.convert(::Type{RemotePtr},x::RemoteCodePtr) = RemotePtr{Void}(x.ptr)
 
 function load{T}(session::LocalSession, ptr::RemotePtr{T})
     unsafe_load(Ptr{T}(ptr.ptr))
+end
+
+function mapped_file
 end

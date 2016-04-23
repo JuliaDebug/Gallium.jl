@@ -14,11 +14,11 @@ using MachO
 using Gallium: find_module, Module, load
 
 
-function get_word(s, ptr::RemotePtr)
+function get_word(s::Gallium.LocalSession, ptr::RemotePtr)
     Gallium.Hooking.mem_validate(UInt(ptr), sizeof(Ptr{Void})) || error("Invalid load")
     load(s, RemotePtr{UInt64}(ptr))
 end
-
+get_word(s, ptr::RemotePtr) = load(s, RemotePtr{UInt64}(ptr))
 
 function find_fde(mod, modrel)
     slide = 0
@@ -55,7 +55,7 @@ end
 function modulerel(mod, base, ip)
     ret = (ip - base)
 end
-function frame(s, modules, r)
+function frame(s, modules, r; stacktop = false)
     base, mod = find_module(modules, UInt(ip(r)))
     modrel = UInt(modulerel(mod, base, UInt(ip(r))))
     loc, fde = try
@@ -71,7 +71,7 @@ function frame(s, modules, r)
     end
     cie = realize_cie(fde)
     # Compute CFA
-    target_delta = modrel - loc - 1
+    target_delta = modrel - loc - (stacktop?0:1)
     @assert target_delta < UInt(CallFrameInfo.fde_range(fde, cie))
     # out = IOContext(STDOUT, :reg_map => Gallium.X86_64.dwarf_numbering)
     # drs = CallFrameInfo.RegStates()
@@ -118,7 +118,7 @@ function symbolicate(modules, ip)
         syms = MachO.Symbols(handle(mod))
     end
     idx = findfirst(syms) do x
-        MachO.isundef(x) && return false
+        isundef(x) && return false
         value = symbolvalue(x, sections)
         #@show value
         value == loc
@@ -145,14 +145,14 @@ function fetch_cfi_value(s, r, resolution, cfa_addr)
     end
 end
 
-function unwind_step(s, modules, r)
+function unwind_step(s, modules, r; stacktop = false)
     new_registers = copy(r)
     # A priori the registers in the new frame will not be valid, we copy them
     # over from above still and propagate as usual in case somebody wants to
     # look at them.
     invalidate_regs!(new_registers)
     cfa, rs, cie, delta = try
-        frame(s, modules, r)
+        frame(s, modules, r; stacktop = stacktop)
     catch e
         rethrow(e)
         return (false, r)

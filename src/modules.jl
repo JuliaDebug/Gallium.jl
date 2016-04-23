@@ -16,6 +16,7 @@ immutable Module
 end
 ObjFileBase.handle(mod::Module) = mod.handle
 dhandle(mod::Module) = mod.dwarfhandle
+dhandle(h) = h
 type LazyLocalModules
     modules::Dict{UInt, Module}
     nsharedlibs::Int
@@ -48,7 +49,7 @@ end
 
 function find_module(modules, ip)
     ret = _find_module(modules, ip)
-    (ret == nothing) && error("Not found")
+    (ret == nothing) && error("ip 0x$(hex(UInt(ip),2sizeof(UInt))) found")
     ret
 end
 
@@ -191,6 +192,8 @@ Load the set of active modules from the GlibC dynamic linker
 module GlibcDyldModules
   using ELF
   using Gallium
+  using ObjFileBase
+  using Gallium: load, mapped_file
 
   immutable link_map
     l_addr::RemotePtr{Void}
@@ -215,7 +218,7 @@ module GlibcDyldModules
   """
   function compute_entry_ptr(auxv_data::Vector{UInt8})
     auxv = reinterpret(UInt64, auxv_data)
-    entry_idx = findfirst(i->auxv2[i] == ELF.AT_ENTRY, 1:2:length(auxv2))
+    entry_idx = findfirst(i->auxv[i] == ELF.AT_ENTRY, 1:2:length(auxv))
     @assert entry_idx != 0
     #  auxv_idx = 1+2(entry_idx-1), we want auxv_idx + 1 == entry_idx
     entry_ptr = auxv[2entry_idx]
@@ -230,7 +233,7 @@ module GlibcDyldModules
     may set `image_slide` to the offset of the executable's load address from
     it's intended load address.
   """
-  function load_library_map(vm, imageh; image_slide = 0)
+  function load_library_map(vm, imageh, image_slide = 0)
     
     # Step 1: Obtain the target address space's r_debug struct
     dynamic_sec = first(filter(x->sectionname(x)==".dynamic",ELF.Sections(imageh)))
@@ -240,7 +243,7 @@ module GlibcDyldModules
     dynamic_load_addr = deref(dynamic_sec).sh_addr + image_slide
 
     dt_debug_addr_addr = RemotePtr{UInt64}(dynamic_load_addr + (2*dt_debug_idx-1)*sizeof(Ptr{Void}))
-    dt_debug_addr = RemotePtr{r_debug}(RR.load(RR.current_task(session), dt_debug_addr_addr))
+    dt_debug_addr = RemotePtr{r_debug}(load(vm, dt_debug_addr_addr))
 
     debug_struct = load(vm, dt_debug_addr)
     last_link_map = load(vm, debug_struct.link_map)
@@ -264,7 +267,7 @@ module GlibcDyldModules
             # Don't use the IOStream directly. We do a look of seeking/poking,
             # so loading the whole thing into memory and using an IOBuffer is
             # faster
-            buf = IOBuffer(open(read, RR.mapped_file(RR.current_task(session), lm.l_addr)))
+            buf = IOBuffer(open(read, mapped_file(vm, lm.l_addr)))
             modules[lm.l_addr] = readmeta(buf)
         end
         lm = load(vm, lm.l_next)

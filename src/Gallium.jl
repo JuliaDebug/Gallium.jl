@@ -23,7 +23,7 @@ module Gallium
     using .Registers: ip, get_dwarf
     using .Hooking
 
-    immutable JuliaStackFrame
+    type JuliaStackFrame
         oh
         file
         ip
@@ -34,13 +34,17 @@ module Gallium
         env::Environment
     end
 
-    immutable CStackFrame
+    type CStackFrame
         ip::Ptr{Void}
+        file::AbstractString
+        line::Int
+        stacktop::Bool
     end
 
     # Fake "Interpreter" that is just a native stack
     immutable NativeStack
         stack
+        modules
     end
 
     ASTInterpreter.done!(stack::NativeStack) = nothing
@@ -84,9 +88,26 @@ module Gallium
     ASTInterpreter.get_linfo(x::JuliaStackFrame) = x.linfo
     ASTInterpreter.get_linfo(x::NativeStack) =
         ASTInterpreter.get_linfo(x.stack[end])
+        
+    const GalliumFrame = Union{NativeStack, JuliaStackFrame, CStackFrame}
+    using DWARF: CallFrameInfo
+    function ASTInterpreter.execute_command(state, x::GalliumFrame, ::Val{:cfi}, command)
+        modules = state.top_interp.modules
+        ip = isa(x, NativeStack) ? x.stack[end].ip : x.ip
+        base, mod = find_module(modules, ip)
+        modrel = UInt(ip - base)
+        loc, fde = Unwinder.find_fde(mod, modrel)
+        cie = realize_cie(fde)
+        target_delta = modrel - loc - 1
+        out = IOContext(STDOUT, :reg_map => Gallium.X86_64.dwarf_numbering)
+        drs = CallFrameInfo.RegStates()
+        CallFrameInfo.dump_program(out, cie, target = UInt(target_delta), rs = drs); println(out)
+        CallFrameInfo.dump_program(out, fde, cie = cie, target = UInt(target_delta), rs = drs)
+        return false
+    end
 
     # Use this hook to expose extra functionality
-    function ASTInterpreter.unknown_command(x::JuliaStackFrame, command)
+    function ASTInterpreter.execute_command(x::JuliaStackFrame, command)
         lip = UInt(x.ip)-x.sstart-1
         if isrelocatable(handle(x.oh))
             lip = UInt(x.ip)-1
@@ -137,8 +158,8 @@ module Gallium
         end
     end
 
-    function ASTInterpreter.unknown_command(x::NativeStack, command)
-        ASTInterpreter.unknown_command(x.stack[end], command)
+    function ASTInterpreter.execute_command(x::NativeStack, command)
+        ASTInterpreter.execute_command(x.stack[end], command)
     end
 
 
@@ -171,10 +192,12 @@ module Gallium
     end
 
     global active_modules = LazyLocalModules()
-    function rec_backtrace(callback, RC)
+    function rec_backtrace(callback, RC, session = LocalSession(), modules = active_modules)
         callback(RC)
+        stacktop = true
         while true
-            (ok, RC) = Unwinder.unwind_step(LocalSession(), active_modules, RC)
+            (ok, RC) = Unwinder.unwind_step(session, modules, RC; stacktop = stacktop)
+            stacktop = false
             ok || break
             callback(RC)
         end
@@ -185,10 +208,10 @@ module Gallium
         set_sp!(RC,RC.rsp[]+sizeof(Ptr{Void}))
     end
 
-    function rec_backtrace_hook(callback, RC)
+    function rec_backtrace_hook(callback, RC, session = LocalSession(), modules = active_modules)
         callback(RC)
         step_first!(RC)
-        rec_backtrace(callback, RC)
+        rec_backtrace(callback, RC, session, modules)
     end
 
     # Validate that an address is a valid location in the julia heap
@@ -201,23 +224,48 @@ module Gallium
         UInt(unsafe_load(typetypeptr))&(~UInt(0x3)) == UInt(pointer_from_objref(DataType))
     end
 
-    function stackwalk(RC)
+    function stackwalk(RC, session = LocalSession(), modules = active_modules; fromhook = false, rich_c = false)
         stack = Any[]
-        rec_backtrace_hook(RC) do RC
+        firstframe = true
+        (fromhook ? rec_backtrace_hook : rec_backtrace)(RC, session, modules) do RC
             theip = reinterpret(Ptr{Void},UInt(ip(RC)))
             ipinfo = (ccall(:jl_lookup_code_address, Any, (Ptr{Void}, Cint),
               theip-1, 0))
             fromC = ipinfo[7]
+            file = ""
+            line = 0
             if fromC
-                push!(stack, CStackFrame(theip))
+                (sstart, h) = find_module(modules, theip)
+                if rich_c
+                    lip = UInt(theip)-sstart-1
+                    dh = dhandle(h)
+                    dbgs,cu,sp = try
+                        (debugsections(dh), 
+                            DWARF.searchcuforip(dbgs, lip),
+                            DWARF.searchspforip(cu, lip))
+                    catch
+                        (nothing, nothing, nothing)
+                    end
+                    if dbgs !== nothing
+                        # Process Compilation Unit to get line table
+                        line_offset = DWARF.extract_attribute(cu, DWARF.DW_AT_stmt_list)
+                        line_offset = isnull(line_offset) ? 0 : convert(UInt, get(line_offset).value)
+
+                        seek(dbgs.debug_line, line_offset)
+                        linetab = DWARF.LineTableSupport.LineTable(handle(dbgs).io)
+                        entry = search_linetab(linetab, lip)
+                        line = entry.line
+                        fileentry = linetab.header.file_names[entry.file]
+                        file = fileentry.name
+                    end
+                end
+                push!(stack, CStackFrame(theip, file, line, firstframe))
             else
-                (sstart, h) = find_module(active_modules, theip)
+                (sstart, h) = find_module(modules, theip)
                 tlinfo = ipinfo[6]::LambdaInfo
                 env = ASTInterpreter.prepare_locals(tlinfo)
                 copy!(env.sparams, tlinfo.sparam_vals)
                 variables = Dict()
-                line = 0
-                file = ""
                 dbgs = debugsections(dhandle(h))
                 try
                     lip = UInt(theip)-sstart-1
@@ -326,6 +374,7 @@ module Gallium
                 #h = readmeta(IOBuffer(data))
                 push!(stack, JuliaStackFrame(h, file, UInt(ip(RC)), sstart, line, ipinfo[6], variables, env))
             end
+            firstframe = false
         end
         reverse!(stack)
     end
@@ -349,7 +398,7 @@ module Gallium
     end
 
     function breakpoint_hit(hook, RC)
-        stack = stackwalk(RC)
+        stack = stackwalk(RC; fromhook = true)
         stacktop = pop!(stack)
         linfo = stacktop.linfo
         argnames = linfo.slotnames[2:linfo.nargs]
@@ -604,13 +653,13 @@ module Gallium
     function breakpoint()
         RC = Hooking.getcontext()
         # -2 to skip getcontext and breakpoint()
-        ASTInterpreter.RunDebugREPL(NativeStack(filter(x->isa(x,JuliaStackFrame),stackwalk(RC)[1:end-2])))
+        ASTInterpreter.RunDebugREPL(NativeStack(filter(x->isa(x,JuliaStackFrame),stackwalk(RC; fromhook = true)[1:end-2],active_modules)))
     end
 
     function breakpoint_on_error_hit(thehook, RC)
         unhook(thehook)
         err = unsafe_pointer_to_objref(Ptr{Void}(RC.rdi[]))
-        stack = stackwalk(RC)
+        stack = stackwalk(RC; fromhook = true)
         ips = [x.ip-1 for x in stack]
         Base.with_output_color(:red, STDERR) do io
             print(io, "ERROR: ")
@@ -618,7 +667,7 @@ module Gallium
             println(io)
         end
         println(STDOUT)
-        ASTInterpreter.RunDebugREPL(NativeStack(filter(x->isa(x,JuliaStackFrame),stack)))
+        ASTInterpreter.RunDebugREPL(NativeStack(filter(x->isa(x,JuliaStackFrame),stack),active_modules))
         # Get a somewhat sensible backtrace when returning
         try; throw(); catch; end
         hook(thehook)
