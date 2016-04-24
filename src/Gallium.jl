@@ -481,7 +481,7 @@ module Gallium
         pop!(bps_at_location[loc],bp)
         if isempty(bps_at_location[loc])
             unhook(Ptr{Void}(loc.addr))
-            delete!(bps_at_location,loc.addr)
+            delete!(bps_at_location,loc)
         end
     end
     function disable(b::Breakpoint)
@@ -560,7 +560,7 @@ module Gallium
     end
 
     function rebreak_tracer(x::Ptr{Void})
-        linfo = unsafe_pointer_to_objref(x)
+        linfo = unsafe_pointer_to_objref(x)::LambdaInfo
         !haskey(TracedMethods, linfo.def) && return nothing
         for s in TracedMethods[linfo.def]
             fire(s, linfo)
@@ -627,8 +627,14 @@ module Gallium
 
     include("breakfile.jl")
 
+    function method_tracer(x::Ptr{Void})
+        ccall(:jl_trace_linfo, Void, (Ptr{Void},), x)
+        nothing
+    end
+
     function __init__()
-        ccall(:jl_register_tracer, Void, (Ptr{Void},), cfunction(rebreak_tracer,Void,(Ptr{Void},)))
+        ccall(:jl_register_linfo_tracer, Void, (Ptr{Void},), cfunction(rebreak_tracer,Void,(Ptr{Void},)))
+        ccall(:jl_register_method_tracer, Void, (Ptr{Void},), cfunction(method_tracer,Void,(Ptr{Void},)))
         arm_breakfile()
     end
 

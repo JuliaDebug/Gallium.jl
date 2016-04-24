@@ -32,7 +32,7 @@ breakmeth(x, y) = x+y
 breakmeth(x::Float64, y::Float64) = x*y
 
 hit_counter = 0
-Gallium.breakpoint(which(breakmeth, Tuple{Int64, Int64}))
+bmbp = Gallium.breakpoint(which(breakmeth, Tuple{Int64, Int64}))
 @test breakmeth(1, 2) == 3
 @test hit_counter == 1
 breakmeth(Float32(1), Float32(2)) # @test == Float32(3)

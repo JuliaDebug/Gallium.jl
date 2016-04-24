@@ -210,7 +210,7 @@ module GlibcDyldModules
     r_state::Cint
     r_ldbase::RemotePtr{Void}
   end
-  
+
   """
     Computes the object's entry point from the kernel's auxv data. By comparing
     this information to the specified entrypoint in the executable image, one
@@ -223,18 +223,17 @@ module GlibcDyldModules
     #  auxv_idx = 1+2(entry_idx-1), we want auxv_idx + 1 == entry_idx
     entry_ptr = auxv[2entry_idx]
   end
-  
+
   """
     Load the shared library map from address space `vm`.
     `imageh` should be the ObjectHandle of the main executable and `auxv_data`
     should be the session's auxv buffer.
-    
+
     If the executable was not loaded at it's defined virtual address, you
     may set `image_slide` to the offset of the executable's load address from
     it's intended load address.
   """
   function load_library_map(vm, imageh, image_slide = 0)
-    
     # Step 1: Obtain the target address space's r_debug struct
     dynamic_sec = first(filter(x->sectionname(x)==".dynamic",ELF.Sections(imageh)))
     dynamic = reinterpret(UInt64,read(dynamic_sec))
