@@ -262,6 +262,7 @@ module Gallium
                 push!(stack, CStackFrame(theip, file, line, firstframe))
             else
                 (sstart, h) = find_module(modules, theip)
+                ipinfo[6] == nothing && return
                 tlinfo = ipinfo[6]::LambdaInfo
                 env = ASTInterpreter.prepare_locals(tlinfo)
                 copy!(env.sparams, tlinfo.sparam_vals)
@@ -636,6 +637,7 @@ module Gallium
         ccall(:jl_register_linfo_tracer, Void, (Ptr{Void},), cfunction(rebreak_tracer,Void,(Ptr{Void},)))
         ccall(:jl_register_method_tracer, Void, (Ptr{Void},), cfunction(method_tracer,Void,(Ptr{Void},)))
         arm_breakfile()
+        update_shlibs!(active_modules)
     end
 
     function breakpoint(f)
@@ -694,4 +696,5 @@ module Gallium
         end
     end
 
+    include("precompile.jl")
 end
