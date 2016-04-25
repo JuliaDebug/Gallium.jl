@@ -1,7 +1,8 @@
 function compute_nlines(meth)
-    maximum(map(x->x.line,
+    lines = collect(map(x->x.line,
         filter(x->isa(x,LineNumberNode),
-        Base.uncompressed_ast(meth.lambda_template))))-meth.line
+        Base.uncompressed_ast(meth.lambda_template))))
+    isempty(lines) ? 1 : maximum(lines) - meth.line
 end
 
 const filemap = Dict{Symbol, Vector{Method}}()
