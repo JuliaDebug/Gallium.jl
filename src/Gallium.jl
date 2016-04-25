@@ -53,6 +53,7 @@ module Gallium
         print(io, "[$num] ")
         linfo = x.linfo
         ASTInterpreter.print_linfo_desc(io, linfo)
+        println(io)
         ASTInterpreter.print_locals(io, linfo, x.env, (io,name)->begin
             if haskey(x.variables, name)
                 if x.variables[name] == :available
@@ -65,6 +66,8 @@ module Gallium
             end
         end)
     end
+    ASTInterpreter.print_frame(io, num, x::NativeStack) =
+        ASTInterpreter.print_frame(io, num, x.stack[end])
 
     function ASTInterpreter.print_status(x::JuliaStackFrame; kwargs...)
         if x.line < 0
@@ -88,7 +91,7 @@ module Gallium
     ASTInterpreter.get_linfo(x::JuliaStackFrame) = x.linfo
     ASTInterpreter.get_linfo(x::NativeStack) =
         ASTInterpreter.get_linfo(x.stack[end])
-        
+
     const GalliumFrame = Union{NativeStack, JuliaStackFrame, CStackFrame}
     using DWARF: CallFrameInfo
     function ASTInterpreter.execute_command(state, x::GalliumFrame, ::Val{:cfi}, command)
@@ -240,7 +243,7 @@ module Gallium
                     lip = UInt(theip)-sstart-1
                     dh = dhandle(h)
                     dbgs,cu,sp = try
-                        (debugsections(dh), 
+                        (debugsections(dh),
                             DWARF.searchcuforip(dbgs, lip),
                             DWARF.searchspforip(cu, lip))
                     catch
