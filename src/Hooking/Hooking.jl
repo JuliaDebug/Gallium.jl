@@ -147,7 +147,9 @@ const hook_length = length(hook_asm_template(UInt(0)))
     end
     hook_addr = UInt(ip(RC))-hook_length
     hook = hooks[reinterpret(Ptr{Void},hook_addr)]
-    ret = hook.callback(hook, copy(RC))
+    cb_RC = copy(RC)
+    set_ip!(cb_RC, hook_addr+1)
+    ret = hook.callback(hook, cb_RC)
     if isa(ret, Deopt)
         ret_addr = ret.addr
         extra_instructions = []
