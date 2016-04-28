@@ -75,7 +75,8 @@ module Gallium
         elseif (!isa(x.file,AbstractString) || isempty(x.file)) || x.line == 0
             println("<No file found. Did DWARF parsing fail?>")
         else
-            ASTInterpreter.print_sourcecode(x.linfo, readstring(x.file), x.line)
+            ASTInterpreter.print_sourcecode(x.linfo,
+                ASTInterpreter.readfileorhist(x.file), x.line)
         end
     end
 
@@ -195,9 +196,8 @@ module Gallium
     end
 
     global active_modules = LazyLocalModules()
-    function rec_backtrace(callback, RC, session = LocalSession(), modules = active_modules)
+    function rec_backtrace(callback, RC, session = LocalSession(), modules = active_modules; stacktop = true)
         callback(RC)
-        stacktop = true
         while true
             (ok, RC) = Unwinder.unwind_step(session, modules, RC; stacktop = stacktop)
             stacktop = false
@@ -214,7 +214,7 @@ module Gallium
     function rec_backtrace_hook(callback, RC, session = LocalSession(), modules = active_modules)
         callback(RC)
         step_first!(RC)
-        rec_backtrace(callback, RC, session, modules)
+        rec_backtrace(callback, RC, session, modules; stacktop = false)
     end
 
     # Validate that an address is a valid location in the julia heap
@@ -288,7 +288,8 @@ module Gallium
                     line = entry.line
                     fileentry = linetab.header.file_names[entry.file]
                     if fileentry.dir_idx == 0
-                        file = Base.find_source_file(fileentry.name)
+                        found_file = Base.find_source_file(fileentry.name)
+                        file = found_file != nothing ? found_file : fileentry.name
                     else
                         file = joinpath(linetab.header.include_directories[fileentry.dir_idx],
                             fileentry.name)

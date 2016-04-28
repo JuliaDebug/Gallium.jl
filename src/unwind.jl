@@ -63,7 +63,7 @@ function frame(s, modules, r; stacktop = false)
     catch e
         # As a special case, if we're in a MachO executable's entry point,
         # we probably don't have unwind info. TODO: Remove this once we support
-        # comapact unwind infom which the entry point does have.
+        # compact unwind info which the entry point does have.
         if isa(handle(mod), MachO.MachOHandle) && readheader(handle(mod)).filetype == MachO.MH_EXECUTE
             probably_in_entrypoint(handle(mod), modrel) && return entry_cfa(mod, r)
         end
