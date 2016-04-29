@@ -403,15 +403,35 @@ module Gallium
             error("Unexpected condition kind")
         end
     end
+    
+    function process_lowlevel_conditionals(loc, RC)
+        !haskey(bps_at_location, loc) && return true
+        stop = true
+        for bp in bps_at_location[loc]
+            for cond in bp.conditions
+                isa(cond, Function) && cond(loc, RC) && return true
+                stop = false
+            end
+        end
+        stop
+    end
 
     macro conditional(bp, condition)
         esc(:(let bp = $bp
-            bp.condition = $(Expr(:quote, condition))
+            push!(bp.conditions, $(Expr(:quote, condition)))
             bp
         end))
     end
+    
+    function conditional(f, bp)
+        push!(bp.conditions, f)
+        bp
+    end
 
     function breakpoint_hit(hook, RC)
+        if !process_lowlevel_conditionals(Location(LocalSession(), hook.addr), RC)
+            return
+        end
         stack = stackwalk(RC; fromhook = true)
         stacktop = pop!(stack)
         linfo = stacktop.linfo
@@ -422,7 +442,7 @@ module Gallium
             idx = findfirst(s->isa(s, FileLineSource), bp.sources)
             idx != 0 ? bp.sources[idx].line : linfo.def.line
         end)
-        conditions = map(bp->bp.condition, bps)
+        conditions = reduce(vcat,map(bp->bp.conditionals, bps))
         thunk = Expr(:->,Expr(:tuple,argnames...),Expr(:block,
             :(linfo = $(quot(linfo))),
             :((loctree, code) = ASTInterpreter.reparse_meth(linfo)),
@@ -436,7 +456,8 @@ module Gallium
             (target_line != linfo.def.line ?
                 :(ASTInterpreter.advance_to_line(interp, $target_line)) :
                 :(nothing)),
-            :(any(c->Gallium.matches_condition(interp,c),$conditions) &&
+            :((isempty($conditions) ||
+                any(c->Gallium.matches_condition(interp,c),$conditions)) &&
                 ASTInterpreter.RunDebugREPL(interp)),
             :(ASTInterpreter.finish!(interp)),
             :(return interp.retval::$(linfo.rettype))))
@@ -454,10 +475,10 @@ module Gallium
         inactive_locations::Vector{Location}
         sources::Vector{LocationSource}
         disable_new::Bool
-        condition::Any
+        conditions::Vector{Any}
     end
-    Breakpoint(locations::Vector{Location}) = Breakpoint(locations, Location[], LocationSource[], false, nothing)
-    Breakpoint() = Breakpoint(Location[], Location[], LocationSource[], false, nothing)
+    Breakpoint(locations::Vector{Location}) = Breakpoint(locations, Location[], LocationSource[], false, Any[])
+    Breakpoint() = Breakpoint(Location[], Location[], LocationSource[], false, Any[])
 
     function print_location(io::IO, vm::LocalSession, loc)
         ipinfo = (ccall(:jl_lookup_code_address, Any, (UInt, Cint),
