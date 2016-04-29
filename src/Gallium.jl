@@ -197,12 +197,16 @@ module Gallium
 
     global active_modules = LazyLocalModules()
     function rec_backtrace(callback, RC, session = LocalSession(), modules = active_modules; stacktop = true)
-        callback(RC)
+        callback(RC) || return
         while true
-            (ok, RC) = Unwinder.unwind_step(session, modules, RC; stacktop = stacktop)
+            (ok, RC) = try
+                Unwinder.unwind_step(session, modules, RC; stacktop = stacktop)
+            catch # e.g. invalid memory access, invalid unwind info etc.
+                break
+            end
             stacktop = false
             ok || break
-            callback(RC)
+            callback(RC) || break
         end
     end
 
@@ -212,7 +216,7 @@ module Gallium
     end
 
     function rec_backtrace_hook(callback, RC, session = LocalSession(), modules = active_modules)
-        callback(RC)
+        callback(RC) || return
         step_first!(RC)
         rec_backtrace(callback, RC, session, modules; stacktop = false)
     end
@@ -238,7 +242,11 @@ module Gallium
             file = ""
             line = 0
             if fromC
-                (sstart, h) = find_module(modules, theip)
+                (sstart, h) = try
+                    find_module(modules, theip)
+                catch # Unwind got it wrong
+                    return false
+                end
                 if rich_c
                     lip = UInt(theip)-sstart-1
                     dh = dhandle(h)
@@ -380,6 +388,7 @@ module Gallium
                 push!(stack, JuliaStackFrame(h, file, UInt(ip(RC)), sstart, line, ipinfo[6], variables, env))
             end
             firstframe = false
+            return true
         end
         reverse!(stack)
     end
@@ -450,19 +459,23 @@ module Gallium
     Breakpoint(locations::Vector{Location}) = Breakpoint(locations, Location[], LocationSource[], false, nothing)
     Breakpoint() = Breakpoint(Location[], Location[], LocationSource[], false, nothing)
 
+    function print_location(io::IO, vm::LocalSession, loc)
+        ipinfo = (ccall(:jl_lookup_code_address, Any, (UInt, Cint),
+            loc.addr, 0))
+        fromC = ipinfo[7]
+        if fromC
+            println(io, "At address ", loc.addr)
+        else
+            linfo = ipinfo[6]::LambdaInfo
+            ASTInterpreter.print_linfo_desc(io, linfo, true)
+            println(io)
+        end
+    end
+
     function print_locations(io::IO, locations, prefix = " - ")
         for loc in locations
             print(io,prefix)
-            ipinfo = (ccall(:jl_lookup_code_address, Any, (UInt, Cint),
-                loc.addr, 0))
-            fromC = ipinfo[7]
-            if fromC
-                println(io, "At address ", addr)
-            else
-                linfo = ipinfo[6]::LambdaInfo
-                ASTInterpreter.print_linfo_desc(io, linfo, true)
-                println(io)
-            end
+            print_location(io, loc.vm, loc)
         end
     end
 
@@ -482,6 +495,9 @@ module Gallium
     end
 
     const bps_at_location = Dict{Location, Set{Breakpoint}}()
+    # session => (addr => loc)
+    disable(s::LocalSession, loc) = unhook(Ptr{Void}(loc.addr))
+    disable(loc::Location) = disable(loc.vm, loc)
     function disable(bp::Breakpoint, loc::Location)
         pop!(bps_at_location[loc],bp)
         if isempty(bps_at_location[loc])
@@ -500,9 +516,11 @@ module Gallium
     end
     remove(b::Breakpoint) = (disable(b); deleteat!(breakpoints, findfirst(breakpoints, b)); nothing)
 
+    enable(s::LocalSession, loc) = hook(breakpoint_hit, Ptr{Void}(loc.addr))
+    enable(loc::Location) = enable(loc.vm, loc)
     function enable(bp::Breakpoint, loc::Location)
         if !haskey(bps_at_location, loc)
-            hook(breakpoint_hit, Ptr{Void}(loc.addr))
+            enable(loc)
             bps_at_location[loc] = Set{Breakpoint}()
         end
         push!(bps_at_location[loc], bp)
@@ -612,7 +630,7 @@ module Gallium
         add_location(bp, Location(LocalSession(),addr))
     end
 
-    function breakpoint(func, args)
+    function breakpoint(func, args::Union{Tuple,DataType})
         argtt = Base.to_tuple_type(args)
         t = Tuple{typeof(func), argtt.parameters...}
         bp = Breakpoint()

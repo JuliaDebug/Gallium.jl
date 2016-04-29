@@ -171,6 +171,7 @@ function find_module(modules::LazyLocalModules, ip)
 end
 
 function lookup_sym(modules, name)
+    name = string(name)
     for (base, h) in modules
       symtab = ELF.Symbols(h)
       strtab = StrTab(symtab)
@@ -183,6 +184,7 @@ function lookup_sym(modules, name)
           return (h, base, sym)
       end
     end
+    error("Not found")
 end
 
 
