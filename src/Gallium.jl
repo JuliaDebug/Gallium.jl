@@ -403,7 +403,7 @@ module Gallium
             error("Unexpected condition kind")
         end
     end
-    
+
     function process_lowlevel_conditionals(loc, RC)
         !haskey(bps_at_location, loc) && return true
         stop = true
@@ -422,7 +422,7 @@ module Gallium
             bp
         end))
     end
-    
+
     function conditional(f, bp)
         push!(bp.conditions, f)
         bp
@@ -442,7 +442,7 @@ module Gallium
             idx = findfirst(s->isa(s, FileLineSource), bp.sources)
             idx != 0 ? bp.sources[idx].line : linfo.def.line
         end)
-        conditions = reduce(vcat,map(bp->bp.conditionals, bps))
+        conditions = reduce(vcat,map(bp->bp.conditions, bps))
         thunk = Expr(:->,Expr(:tuple,argnames...),Expr(:block,
             :(linfo = $(quot(linfo))),
             :((loctree, code) = ASTInterpreter.reparse_meth(linfo)),
