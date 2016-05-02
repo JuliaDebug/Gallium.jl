@@ -8,15 +8,15 @@ module X86_64
   0  => :rax,   1  => :rdx,   2  => :rcx,
   3  => :rbx,   4  => :rsi,   5  => :rdi,
   6  => :rbp,   7  => :rsp,
-  (i => symbol("r$i") for i = 8:15)...,
+  (i => Symbol("r$i") for i = 8:15)...,
   16 => :rip,
-  (17+i => symbol("xmm$i") for i = 0:15)...,
-  (33+i => symbol("st$i") for i = 0:7)...,
-  (41+i => symbol("mm$i") for i = 0:7)...,
+  (17+i => Symbol("xmm$i") for i = 0:15)...,
+  (33+i => Symbol("st$i") for i = 0:7)...,
+  (41+i => Symbol("mm$i") for i = 0:7)...,
   49 => :rflags,
   50 => :es, 51 => :cs, 52 => :ss,
   53 => :ds, 54 => :fs, 55 => :gs,
-  58 => symbol("fs.base"), 59 => symbol("gs.base"),
+  58 => Symbol("fs.base"), 59 => Symbol("gs.base"),
   62 => :tr, 63 => :ldtr, 64 => :mxcsr, 65 => :fcw,
   66 => :fsw)
   const inverse_dwarf = map(p->p[2]=>p[1], dwarf_numbering)
@@ -67,7 +67,7 @@ module X86_64
   end
 
   const state_64_regs = [:rax, :rbx, :rcx, :rdx, :rdi, :rsi, :rbp, :rsp,
-    (symbol("r$i") for i = 8:15)..., :rip, #= :rflags, :cs, :fs, :gs =#]
+    (Symbol("r$i") for i = 8:15)..., :rip, #= :rflags, :cs, :fs, :gs =#]
   function BasicRegs(thread::MachO.thread_command)
     RC = BasicRegs()
     if thread.flavor == MachO.x86_THREAD_STATE64

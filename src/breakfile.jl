@@ -25,13 +25,9 @@ function initial_sweep()
                 push!(visited_modules, x)
                 continue
             else
-                mts = methods(x)
-                !isa(mts, Array) && (mts = [mts])
-                for mt in mts
-                    Base.visit(mt) do m
-                        m = m.func
-                        register_meth(m)
-                    end
+                mt = methods(x)
+                for m in mt
+                    register_meth(m)
                 end
             end
         end

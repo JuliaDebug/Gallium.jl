@@ -171,7 +171,7 @@ module Gallium
 
     # Move this somewhere better
     function ObjFileBase.getSectionLoadAddress(LOI::Dict, sec)
-        return LOI[symbol(sectionname(sec))]
+        return LOI[Symbol(sectionname(sec))]
     end
 
     function search_linetab(linetab, ip)
@@ -191,7 +191,7 @@ module Gallium
 
     function rec_backtrace(RC)
         ips = Array(UInt64, 0)
-        rec_backtrace(RC->push!(ips,ip(RC)), RC)
+        rec_backtrace(RC->(push!(ips,ip(RC)); return true), RC)
         ips
     end
 
@@ -328,7 +328,7 @@ module Gallium
                         name = DWARF.extract_attribute(vardie,DWARF.DW_AT_name)
                         loc = DWARF.extract_attribute(vardie,DWARF.DW_AT_location)
                         (isnull(name) || isnull(loc)) && continue
-                        name = symbol(bytestring(get(name).value,StrTab(dbgs.debug_str)))
+                        name = Symbol(bytestring(get(name).value,StrTab(dbgs.debug_str)))
                         loc = get(loc)
                         if loc.spec.form == DWARF.DW_FORM_exprloc
                             sm = DWARF.Expressions.StateMachine{typeof(loc.value).parameters[1]}()
@@ -685,7 +685,7 @@ module Gallium
 
     function breakpoint(f)
         bp = Breakpoint()
-        Base.visit(methods(f)) do meth
+        for meth in methods(f)
             add_meth_to_bp!(bp, meth)
         end
         unshift!(bp.sources, MethSource(bp, typeof(f)))
