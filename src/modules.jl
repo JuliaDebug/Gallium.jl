@@ -1,6 +1,6 @@
 using DWARF
 using DWARF.CallFrameInfo
-using DWARF.CallFrameInfo: EhFrameRef
+using DWARF.CallFrameInfo: EhFrameRef, CIECache
 using ObjFileBase
 using ObjFileBase: handle, isrelocatable, Sections, mangle_sname
 
@@ -16,10 +16,11 @@ immutable Module{T<:ObjFileBase.ObjectHandle, SR<:ObjFileBase.SectionRef}
     # this is the handle to it
     dwarfhandle::T
     FDETab::Vector{Tuple{Int,UInt}}
+    ciecache::CIECache
     sz::UInt
 end
-Module(handle, eh_frame, eh_frame_hdr, dwarfhandle, FDETab, sz) =
-    Module{typeof(handle),typeof(eh_frame)}(handle, eh_frame, eh_frame_hdr, dwarfhandle, FDETab, sz)
+Module(handle, eh_frame, eh_frame_hdr, dwarfhandle, FDETab, ciecache, sz) =
+    Module{typeof(handle),typeof(eh_frame)}(handle, eh_frame, eh_frame_hdr, dwarfhandle, FDETab, ciecache, sz)
 
 ObjFileBase.handle(mod::Module) = mod.handle
 dhandle(mod::Module) = mod.dwarfhandle
@@ -152,7 +153,8 @@ find_ehfr(h) = EhFrameRef(find_eh_frame_hdr(h), find_ehframes(h)[1])
             vmaddr = first_actual_segment(h).vmaddr
             base += vmaddr
             modules.modules[base] = Module(h, ehfs[], Nullable{EhFrameRef}(),
-                obtain_dsym(fname, h), fdetab, compute_mod_size(h))
+                obtain_dsym(fname, h), fdetab, CallFrameInfo.precompute(ehfs[]),
+                compute_mod_size(h))
         end
         modules.nsharedlibs = nactuallibs
         return true
@@ -190,8 +192,9 @@ function find_module(modules::LazyLocalModules, ip)
             ehfr = Nullable{EhFrameRef}(find_ehfr(h))
         end
         isa(h, MachO.MachOHandle) && isempty(fdetab) && (fdetab = make_fdetab(sstart, h))
-        modules.modules[sstart] = Module(h, find_ehframes(h)[],
-            ehfr, h, fdetab, compute_mod_size(h))
+        eh_frame = find_ehframes(h)[]
+        modules.modules[sstart] = Module(h, eh_frame,
+            ehfr, h, fdetab, CallFrameInfo.precompute(eh_frame), compute_mod_size(h))
         Pair{UInt,Any}(sstart, modules.modules[sstart])
     end
 end
@@ -222,6 +225,7 @@ module GlibcDyldModules
   using Gallium
   using ObjFileBase
   using Gallium: load, mapped_file
+  using DWARF.CallFrameInfo
   using DWARF.CallFrameInfo: EhFrameRef
 
   immutable link_map
@@ -258,7 +262,8 @@ module GlibcDyldModules
       eh_frame_hdr = Gallium.find_eh_frame_hdr(h)
       Gallium.Module(h, eh_frame, EhFrameRef(eh_frame_hdr, eh_frame), h,
         Vector{Tuple{Int,UInt}}(),
-      Gallium.compute_mod_size(h))
+        CallFrameInfo.precompute(eh_frame),
+        Gallium.compute_mod_size(h))
   end
 
   """

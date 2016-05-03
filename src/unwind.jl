@@ -2,6 +2,7 @@ module Unwinder
 
 using DWARF
 using DWARF.CallFrameInfo
+import DWARF.CallFrameInfo: realize_cie
 using ObjFileBase
 using ObjFileBase: handle
 using Gallium
@@ -53,6 +54,9 @@ end
 function modulerel(mod, base, ip)
     ret = (ip - base)
 end
+
+realize_cie(mod::Module, fde) = realize_cie(mod.ciecache, fde)
+
 function frame(s, modules, r; stacktop = false)
     base, mod = find_module(modules, UInt(ip(r)))
     modrel = UInt(modulerel(mod, base, UInt(ip(r))))
@@ -67,7 +71,9 @@ function frame(s, modules, r; stacktop = false)
         end
         rethrow(e)
     end
-    cie = realize_cie(fde)
+    ciecache = nothing
+    isa(mod, Module) && (ciecache = mod.ciecache)
+    cie, ccoff = realize_cieoff(fde, ciecache)
     # Compute CFA
     target_delta = modrel - loc - (stacktop?0:1)
     @assert target_delta < UInt(CallFrameInfo.fde_range(fde, cie))
@@ -75,10 +81,11 @@ function frame(s, modules, r; stacktop = false)
     # drs = CallFrameInfo.RegStates()
     # CallFrameInfo.dump_program(out, cie, target = UInt(target_delta), rs = drs); println(out)
     # CallFrameInfo.dump_program(out, fde, cie = cie, target = UInt(target_delta), rs = drs)
-    rs = CallFrameInfo.evaluate_program(fde, UInt(target_delta), cie = cie)
+    rs = CallFrameInfo.evaluate_program(fde, UInt(target_delta), cie = cie, ciecache = ciecache, ccoff=ccoff)
     local cfa_addr
-    if isa(rs.cfa, Tuple{CallFrameInfo.RegNum,Int})
-        cfa_addr = RemotePtr{Void}(convert(Int, get_dwarf(r, Int(rs.cfa[1])) + rs.cfa[2]))
+    if !isnull(rs.cfa_off)
+        cfa = get(rs.cfa_off)
+        cfa_addr = RemotePtr{Void}(convert(Int, get_dwarf(r, Int(cfa[1])) + cfa[2]))
     elseif isa(rs.cfa, CallFrameInfo.Undef)
         error("CFA may not be undef")
     else
