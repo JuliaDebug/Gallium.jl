@@ -14,6 +14,12 @@ using ELF
 using MachO
 using Gallium: find_module, Module, load
 
+type CFICache
+    sz :: Int
+    values :: Dict{RemotePtr{Void}, Tuple{CallFrameInfo.RegStates,CallFrameInfo.CIE,UInt}}
+end
+
+CFICache(sz::Int) = CFICache(sz, Dict{RemotePtr{Void}, Tuple{CallFrameInfo.RegStates,CallFrameInfo.CIE,UInt}}())
 
 function get_word(s::Gallium.LocalSession, ptr::RemotePtr)
     Gallium.Hooking.mem_validate(UInt(ptr), sizeof(Ptr{Void})) || error("Invalid load")
@@ -57,7 +63,7 @@ end
 
 realize_cie(mod::Module, fde) = realize_cie(mod.ciecache, fde)
 
-function frame(s, modules, r; stacktop = false)
+function compute_register_states(s, modules, r, stacktop, ::Void)
     base, mod = find_module(modules, UInt(ip(r)))
     modrel = UInt(modulerel(mod, base, UInt(ip(r))))
     loc, fde = try
@@ -81,7 +87,24 @@ function frame(s, modules, r; stacktop = false)
     # drs = CallFrameInfo.RegStates()
     # CallFrameInfo.dump_program(out, cie, target = UInt(target_delta), rs = drs); println(out)
     # CallFrameInfo.dump_program(out, fde, cie = cie, target = UInt(target_delta), rs = drs)
-    rs = CallFrameInfo.evaluate_program(fde, UInt(target_delta), cie = cie, ciecache = ciecache, ccoff=ccoff)
+    CallFrameInfo.evaluate_program(fde, UInt(target_delta), cie = cie, ciecache = ciecache, ccoff=ccoff), cie, target_delta
+end
+
+function compute_register_states(s, modules, r, stacktop, cfi_cache::CFICache)
+    pc = RemotePtr{Void}(UInt(ip(r)))
+    if haskey(cfi_cache.values, pc)
+        return cfi_cache.values[pc]
+    else
+        result = compute_register_states(s, modules, r, stacktop, nothing)
+        if length(cfi_cache.values) < cfi_cache.sz
+            cfi_cache.values[pc] = result
+        end
+        result
+    end
+end
+
+function frame(s, modules, r, stacktop :: Bool, cfi_cache)
+    rs, cie, target_delta = compute_register_states(s, modules, r, stacktop, cfi_cache)
     local cfa_addr
     if !CallFrameInfo.isdwarfexpr(rs.cfa)
         if rs.cfa.flag != CallFrameInfo.Flag.Val
@@ -148,15 +171,14 @@ function fetch_cfi_value(s, r, resolution, cfa_addr)
         error("Unknown resolution $resolution")
     end
 end
-
-function unwind_step(s, modules, r; stacktop = false, ip_only = false)
+function unwind_step(s, modules, r, cfi_cache = nothing; stacktop = false, ip_only = false)
     new_registers = copy(r)
     # A priori the registers in the new frame will not be valid, we copy them
     # over from above still and propagate as usual in case somebody wants to
     # look at them.
     invalidate_regs!(new_registers)
     cfa, rs, cie, delta = try
-        frame(s, modules, r; stacktop = stacktop)
+        frame(s, modules, r, stacktop, cfi_cache)
     catch e
         rethrow(e)
         return (false, r)

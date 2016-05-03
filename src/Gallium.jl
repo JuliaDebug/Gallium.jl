@@ -196,11 +196,11 @@ module Gallium
     end
 
     global active_modules = LazyLocalModules()
-    function rec_backtrace(callback, RC, session = LocalSession(), modules = active_modules, ip_only = false; stacktop = true)
+    function rec_backtrace(callback, RC, session = LocalSession(), modules = active_modules, ip_only = false, cfi_cache = nothing; stacktop = true)
         callback(RC) || return
         while true
             (ok, RC) = try
-                Unwinder.unwind_step(session, modules, RC; stacktop = stacktop, ip_only = ip_only)
+                Unwinder.unwind_step(session, modules, RC, cfi_cache; stacktop = stacktop, ip_only = ip_only)
             catch e # e.g. invalid memory access, invalid unwind info etc.
                 break
             end
