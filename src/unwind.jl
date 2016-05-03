@@ -2,7 +2,7 @@ module Unwinder
 
 using DWARF
 using DWARF.CallFrameInfo
-import DWARF.CallFrameInfo: realize_cie
+import DWARF.CallFrameInfo: realize_cie, RegStates, CIE
 using ObjFileBase
 using ObjFileBase: handle
 using Gallium
@@ -14,9 +14,10 @@ using ELF
 using MachO
 using Gallium: find_module, Module, load
 
+typealias CFICacheEntry Tuple{CallFrameInfo.RegStates,CallFrameInfo.CIE,UInt}
 type CFICache
     sz :: Int
-    values :: Dict{RemotePtr{Void}, Tuple{CallFrameInfo.RegStates,CallFrameInfo.CIE,UInt}}
+    values :: Dict{RemotePtr{Void}, CFICacheEntry}
 end
 
 CFICache(sz::Int) = CFICache(sz, Dict{RemotePtr{Void}, Tuple{CallFrameInfo.RegStates,CallFrameInfo.CIE,UInt}}())
@@ -79,32 +80,53 @@ function compute_register_states(s, modules, r, stacktop, ::Void)
     end
     ciecache = nothing
     isa(mod, Module) && (ciecache = mod.ciecache)
-    cie, ccoff = realize_cieoff(fde, ciecache)
+    cie::CIE, ccoff = realize_cieoff(fde, ciecache)
     # Compute CFA
-    target_delta = modrel - loc - (stacktop?0:1)
+    target_delta::UInt64 = modrel - loc - (stacktop?0:1)
     @assert target_delta < UInt(CallFrameInfo.fde_range(fde, cie))
     # out = IOContext(STDOUT, :reg_map => Gallium.X86_64.dwarf_numbering)
     # drs = CallFrameInfo.RegStates()
     # CallFrameInfo.dump_program(out, cie, target = UInt(target_delta), rs = drs); println(out)
     # CallFrameInfo.dump_program(out, fde, cie = cie, target = UInt(target_delta), rs = drs)
-    CallFrameInfo.evaluate_program(fde, UInt(target_delta), cie = cie, ciecache = ciecache, ccoff=ccoff), cie, target_delta
+    CallFrameInfo.evaluate_program(fde, UInt(target_delta), cie = cie, ciecache = ciecache, ccoff=ccoff)::RegStates, cie, target_delta
 end
 
 function compute_register_states(s, modules, r, stacktop, cfi_cache::CFICache)
     pc = RemotePtr{Void}(UInt(ip(r)))
     if haskey(cfi_cache.values, pc)
-        return cfi_cache.values[pc]
+        return cfi_cache.values[pc]::CFICacheEntry
     else
-        result = compute_register_states(s, modules, r, stacktop, nothing)
+        result = compute_register_states(s, modules, r, stacktop, nothing)::CFICacheEntry
         if length(cfi_cache.values) < cfi_cache.sz
             cfi_cache.values[pc] = result
         end
-        result
+        result::CFICacheEntry
     end
 end
 
+immutable Frame
+    cfa_addr::RemotePtr{Void}
+    rs::RegStates
+    cie::CIE
+    target_delta::UInt64
+end
+
+function evaluate_cfa_expr(s, r, rs)
+    sm = DWARF.Expressions.StateMachine{typeof(unsigned(ip(r)))}()
+    getreg(reg) = get_dwarf(r, reg)
+    getword(addr) = get_word(s, addr)[]
+    addr_func(addr) = addr
+    loc = DWARF.Expressions.evaluate_simple_location(sm, rs.cfa_expr.opcodes, getreg, getword, addr_func, :NativeEndian)
+    if isa(loc, DWARF.Expressions.RegisterLocation)
+        cfa_addr = RemotePtr{Void}(get_dwarf(r, loc.i))
+    else
+        cfa_addr = RemotePtr{Void}(loc.i)
+    end
+    cfa_addr
+end
+
 function frame(s, modules, r, stacktop :: Bool, cfi_cache)
-    rs, cie, target_delta = compute_register_states(s, modules, r, stacktop, cfi_cache)
+    rs, cie, target_delta = compute_register_states(s, modules, r, stacktop, cfi_cache)::CFICacheEntry
     local cfa_addr
     if !CallFrameInfo.isdwarfexpr(rs.cfa)
         if rs.cfa.flag != CallFrameInfo.Flag.Val
@@ -112,18 +134,9 @@ function frame(s, modules, r, stacktop :: Bool, cfi_cache)
         end
         cfa_addr = RemotePtr{Void}(convert(Int, get_dwarf(r, Int(rs.cfa.base)) + rs.cfa.offset))
     else
-        sm = DWARF.Expressions.StateMachine{typeof(unsigned(ip(r)))}()
-        getreg(reg) = get_dwarf(r, reg)
-        getword(addr) = get_word(s, addr)[]
-        addr_func(addr) = addr
-        loc = DWARF.Expressions.evaluate_simple_location(sm, rs.cfa_expr.opcodes, getreg, getword, addr_func, :NativeEndian)
-        if isa(loc, DWARF.Expressions.RegisterLocation)
-            cfa_addr = RemotePtr{Void}(get_dwarf(r, loc.i))
-        else
-            cfa_addr = RemotePtr{Void}(loc.i)
-        end
+        cfa_addr = evaluate_cfa_expr(s, r, rs)
     end
-    cfa_addr, rs, cie, UInt64(target_delta)
+    Frame(cfa_addr, rs, cie, UInt64(target_delta))
 end
 
 function symbolicate(modules, ip)
@@ -177,7 +190,7 @@ function unwind_step(s, modules, r, cfi_cache = nothing; stacktop = false, ip_on
     # over from above still and propagate as usual in case somebody wants to
     # look at them.
     invalidate_regs!(new_registers)
-    cfa, rs, cie, delta = try
+    cf = try
         frame(s, modules, r, stacktop, cfi_cache)
     catch e
         rethrow(e)
@@ -194,16 +207,16 @@ function unwind_step(s, modules, r, cfi_cache = nothing; stacktop = false, ip_on
     end=#
 
     # By definition, the next frame's stack pointer is our CFA
-    set_sp!(new_registers, UInt(cfa))
-    CallFrameInfo.isundef(rs[cie.return_reg]) && return (false, r)
+    set_sp!(new_registers, UInt(cf.cfa_addr))
+    CallFrameInfo.isundef(cf.rs[cf.cie.return_reg]) && return (false, r)
     # Find current frame's return address, (i.e. the new frame's ip)
-    set_ip!(new_registers, fetch_cfi_value(s, r, rs[cie.return_reg], cfa))
+    set_ip!(new_registers, fetch_cfi_value(s, r, cf.rs[cf.cie.return_reg], cf.cfa_addr))
     # Now set other registers recorded in the CFI
     if !ip_only
-        for reg in keys(rs.values)
-            resolution = rs.values[reg]
-            reg == cie.return_reg && continue
-            set_dwarf!(new_registers, reg, fetch_cfi_value(s, r, resolution, cfa))
+        for reg in keys(cf.rs.values)
+            resolution = cf.rs.values[reg]
+            reg == cf.cie.return_reg && continue
+            set_dwarf!(new_registers, reg, fetch_cfi_value(s, r, resolution, cf.cfa_addr))
         end
     end
     UInt(ip(new_registers)) == 0 &&  return (false, r)
