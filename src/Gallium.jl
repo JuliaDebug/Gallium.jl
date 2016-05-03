@@ -191,17 +191,17 @@ module Gallium
 
     function rec_backtrace(RC)
         ips = Array(UInt64, 0)
-        rec_backtrace(RC->(push!(ips,ip(RC)); return true), RC)
+        rec_backtrace(RC->push!(ips,ip(RC)), RC)
         ips
     end
 
     global active_modules = LazyLocalModules()
-    function rec_backtrace(callback, RC, session = LocalSession(), modules = active_modules; stacktop = true)
+    function rec_backtrace(callback, RC, session = LocalSession(), modules = active_modules, ip_only = false; stacktop = true)
         callback(RC) || return
         while true
             (ok, RC) = try
-                Unwinder.unwind_step(session, modules, RC; stacktop = stacktop)
-            catch # e.g. invalid memory access, invalid unwind info etc.
+                Unwinder.unwind_step(session, modules, RC; stacktop = stacktop, ip_only = ip_only)
+            catch e # e.g. invalid memory access, invalid unwind info etc.
                 break
             end
             stacktop = false
@@ -215,10 +215,10 @@ module Gallium
         set_sp!(RC,RC.rsp[]+sizeof(Ptr{Void}))
     end
 
-    function rec_backtrace_hook(callback, RC, session = LocalSession(), modules = active_modules)
+    function rec_backtrace_hook(callback, RC, session = LocalSession(), modules = active_modules, ip_only = false)
         callback(RC) || return
         step_first!(RC)
-        rec_backtrace(callback, RC, session, modules; stacktop = false)
+        rec_backtrace(callback, RC, session, modules, ip_only; stacktop = false)
     end
 
     # Validate that an address is a valid location in the julia heap
@@ -231,10 +231,10 @@ module Gallium
         UInt(unsafe_load(typetypeptr))&(~UInt(0x3)) == UInt(pointer_from_objref(DataType))
     end
 
-    function stackwalk(RC, session = LocalSession(), modules = active_modules; fromhook = false, rich_c = false)
+    function stackwalk(RC, session = LocalSession(), modules = active_modules; fromhook = false, rich_c = false, ip_only = false)
         stack = Any[]
         firstframe = true
-        (fromhook ? rec_backtrace_hook : rec_backtrace)(RC, session, modules) do RC
+        (fromhook ? rec_backtrace_hook : rec_backtrace)(RC, session, modules, ip_only) do RC
             theip = reinterpret(Ptr{Void},UInt(ip(RC)))
             ipinfo = (ccall(:jl_lookup_code_address, Any, (Ptr{Void}, Cint),
               theip-1, 0))
@@ -242,7 +242,7 @@ module Gallium
             file = ""
             line = 0
             if fromC
-                (sstart, h) = try
+                sstart, h = try
                     find_module(modules, theip)
                 catch # Unwind got it wrong
                     return false
@@ -272,7 +272,7 @@ module Gallium
                 end
                 push!(stack, CStackFrame(theip, file, line, firstframe))
             else
-                (sstart, h) = find_module(modules, theip)
+                sstart, h = find_module(modules, theip)
                 ipinfo[6] == nothing && return
                 tlinfo = ipinfo[6]::LambdaInfo
                 env = ASTInterpreter.prepare_locals(tlinfo)
@@ -685,7 +685,7 @@ module Gallium
 
     function breakpoint(f)
         bp = Breakpoint()
-        for meth in methods(f)
+        Base.visit(methods(f)) do meth
             add_meth_to_bp!(bp, meth)
         end
         unshift!(bp.sources, MethSource(bp, typeof(f)))

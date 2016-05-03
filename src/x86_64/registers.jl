@@ -26,6 +26,10 @@ module X86_64
     (i => dwarf_numbering[i] for i in basic_regs)...)
   const inverse_gdb = map(p->p[2]=>p[1], gdb_numbering)
 
+  # This operation can be performance critical, precompute it.
+  const dwarf2gdbmap = [inverse_gdb[dwarf_numbering[regno]] for regno in basic_regs]
+  dwarf2gdb(regno) = dwarf2gdbmap[regno+1]
+
   # Basic Register Set
   const RegT = RegisterValue{UInt64}
   @eval type BasicRegs <: RegisterSet

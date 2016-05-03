@@ -22,17 +22,15 @@ get_word(s, ptr::RemotePtr) = load(s, RemotePtr{UInt64}(ptr))
 
 function find_fde(mod, modrel)
     slide = 0
-    eh_frame = Gallium.find_ehframes(handle(mod))[]
-    if isa(mod, Module) && !isempty(mod.FDETab)
-        tab = mod.FDETab
-        return CallFrameInfo.search_fde_offset(eh_frame, tab, modrel, slide)
+    eh_frame = Gallium.find_ehframes(mod)[1]
+    if isa(mod, Module) && isnull(mod.ehfr)
+        return CallFrameInfo.search_fde_offset(eh_frame, mod.FDETab, modrel, slide)
     else
-        eh_frame_hdr = first(filter(x->sectionname(x)==mangle_sname(handle(mod),"eh_frame_hdr"),Sections(handle(mod))))
-        tab = CallFrameInfo.EhFrameRef(eh_frame_hdr, eh_frame)
-        modrel = Int(modrel)-Int(sectionoffset(eh_frame_hdr))
-        slide = sectionoffset(eh_frame_hdr) - sectionoffset(eh_frame)
+        tab = Gallium.find_ehfr(mod)
+        modrel = Int(modrel)-Int(sectionoffset(tab.hdr_sec))
+        slide = sectionoffset(tab.hdr_sec) - sectionoffset(eh_frame)
         loc, fde = CallFrameInfo.search_fde_offset(eh_frame, tab, modrel, slide)
-        loc = loc + Int(sectionoffset(eh_frame_hdr))
+        loc = loc + Int(sectionoffset(tab.hdr_sec))
         return (loc, fde)
     end
 end
@@ -145,7 +143,7 @@ function fetch_cfi_value(s, r, resolution, cfa_addr)
     end
 end
 
-function unwind_step(s, modules, r; stacktop = false)
+function unwind_step(s, modules, r; stacktop = false, ip_only = false)
     new_registers = copy(r)
     # A priori the registers in the new frame will not be valid, we copy them
     # over from above still and propagate as usual in case somebody wants to
@@ -173,9 +171,11 @@ function unwind_step(s, modules, r; stacktop = false)
     # Find current frame's return address, (i.e. the new frame's ip)
     set_ip!(new_registers, fetch_cfi_value(s, r, rs[cie.return_reg], cfa))
     # Now set other registers recorded in the CFI
-    for (reg, resolution) in rs.values
-        reg == cie.return_reg && continue
-        set_dwarf!(new_registers, reg, fetch_cfi_value(s, r, resolution, cfa))
+    if !ip_only
+        for (reg, resolution) in rs.values
+            reg == cie.return_reg && continue
+            set_dwarf!(new_registers, reg, fetch_cfi_value(s, r, resolution, cfa))
+        end
     end
     UInt(ip(new_registers)) == 0 &&  return (false, r)
     (true, new_registers)

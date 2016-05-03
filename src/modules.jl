@@ -1,5 +1,6 @@
 using DWARF
 using DWARF.CallFrameInfo
+using DWARF.CallFrameInfo: EhFrameRef
 using ObjFileBase
 using ObjFileBase: handle, isrelocatable, Sections, mangle_sname
 
@@ -7,13 +8,19 @@ using ObjFileBase: handle, isrelocatable, Sections, mangle_sname
 Keeps a list of local modules, lazy loading those that it doesn't have from
 the current process's address space.
 """
-immutable Module
-    handle::Any
+immutable Module{T<:ObjFileBase.ObjectHandle, SR<:ObjFileBase.SectionRef}
+    handle::T
+    eh_frame::Nullable{SR}
+    ehfr::Nullable{EhFrameRef}
     # If the object containing this module's DWARF info is different,
     # this is the handle to it
-    dwarfhandle::Any
+    dwarfhandle::T
     FDETab::Vector{Tuple{Int,UInt}}
+    sz::UInt
 end
+Module(handle, eh_frame, eh_frame_hdr, dwarfhandle, FDETab, sz) =
+    Module{typeof(handle),typeof(eh_frame)}(handle, eh_frame, eh_frame_hdr, dwarfhandle, FDETab, sz)
+
 ObjFileBase.handle(mod::Module) = mod.handle
 dhandle(mod::Module) = mod.dwarfhandle
 dhandle(h) = h
@@ -27,30 +34,35 @@ function first_actual_segment(h)
     deref(first(filter(x->isa(deref(x),MachO.segment_commands)&&(segname(x)!="__PAGEZERO"), LoadCmds(handle(h)))))
 end
 
-function _find_module(modules, ip)
-    for (base, h) in modules
-        (base, ip) = (UInt(base), UInt(ip))
-        # TODO: cache this
-        local sz
-        if isrelocatable(handle(h))
-            sz = sectionsize(first(filter(x->sectionname(x) == mangle_sname(handle(h),"text"), Sections(handle(h)))))
-        elseif isa(handle(h), ELF.ELFHandle)
-            phs = ELF.ProgramHeaders(handle(h))
-            sz = first(filter(x->x.p_type == ELF.PT_LOAD, phs)).p_memsz
-        elseif isa(handle(h), MachO.MachOHandle)
-            sz = first_actual_segment(h).vmsize
-        end
+function compute_mod_size(h)
+    if isrelocatable(handle(h))
+        sz = sectionsize(first(filter(x->sectionname(x) == mangle_sname(handle(h),"text"), Sections(handle(h)))))
+    elseif isa(handle(h), ELF.ELFHandle)
+        phs = ELF.ProgramHeaders(handle(h))
+        sz = first(filter(x->x.p_type == ELF.PT_LOAD, phs)).p_memsz
+    elseif isa(handle(h), MachO.MachOHandle)
+        sz = first_actual_segment(h).vmsize
+    end
+    UInt(sz)
+end
+compute_mod_size(m::Module) = UInt(m.sz)
+
+@inline function _find_module(modules, theip)
+    ip = UInt(theip)
+    for (mbase, h) in modules
+        base = UInt(mbase)
+        sz = compute_mod_size(h)::UInt
         if base <= ip <= base + sz
-            return (base, h)
+            return Nullable{Pair{UInt,Any}}(Pair{UInt,Any}(base,h))
         end
     end
-    nothing
+    Nullable{Pair{UInt,Any}}()
 end
 
 function find_module(modules, ip)
     ret = _find_module(modules, ip)
-    (ret == nothing) && error("ip 0x$(hex(UInt(ip),2sizeof(UInt))) found")
-    ret
+    isnull(ret) && error("ip 0x$(hex(UInt(ip),2sizeof(UInt))) found")
+    get(ret)
 end
 
 """
@@ -100,6 +112,16 @@ function find_ehframes(h::MachO.MachOHandle)
     mapreduce(x->find_ehframes(Sections(x)), vcat,
         filter(x->isa(deref(x), MachO.segment_commands), LoadCmds(h)))
 end
+function find_ehframes{T}(m::Module{T})
+    (get(m.eh_frame)::SectionRef(T),)
+end
+function find_eh_frame_hdr(h)
+    first(filter(x->sectionname(x)==mangle_sname(handle(h),"eh_frame_hdr"),Sections(handle(h))))
+end
+find_eh_frame_hdr{T}(m::Module{T}) = (get(mod.ehfr).hdr_sec)::SectionRef(T)
+
+find_ehfr(mod::Module) = get(mod.ehfr)
+find_ehfr(h) = EhFrameRef(find_eh_frame_hdr(h), find_ehframes(h)[1])
 
 @osx_only function update_shlibs!(modules)
     nactuallibs = ccall(:_dyld_image_count, UInt32, ())
@@ -129,7 +151,8 @@ end
             fdetab = make_fdetab(base, h)
             vmaddr = first_actual_segment(h).vmaddr
             base += vmaddr
-            modules.modules[base] = Module(h, obtain_dsym(fname, h), fdetab)
+            modules.modules[base] = Module(h, ehfs[], Nullable{EhFrameRef}(),
+                obtain_dsym(fname, h), fdetab, compute_mod_size(h))
         end
         modules.nsharedlibs = nactuallibs
         return true
@@ -144,7 +167,7 @@ end
 
 function find_module(modules::LazyLocalModules, ip)
     ret = _find_module(modules.modules, ip)
-    if ret == nothing
+    return !isnull(ret) ? get(ret) : begin
         if update_shlibs!(modules)
             return find_module(modules, ip)
         end
@@ -154,6 +177,7 @@ function find_module(modules::LazyLocalModules, ip)
         h = readmeta(buf)
         sstart = ccall(:jl_get_section_start, UInt64, (UInt,), ip-1)
         fdetab = Vector{Tuple{Int,UInt}}()
+        ehfr = Nullable{EhFrameRef}()
         if isrelocatable(h)
           isa(h, ELF.ELFHandle) && ELF.relocate!(buf, h)
           fdetab = make_fdetab(sstart, h)
@@ -162,18 +186,20 @@ function find_module(modules::LazyLocalModules, ip)
                 :__debug_str=>0) #This one really shouldn't be necessary
             MachO.relocate!(buf, h; LOI=LOI)
           end
+        elseif isa(h, ELF.ELFHandle)
+            ehfr = Nullable{EhFrameRef}(find_ehfr(h))
         end
         isa(h, MachO.MachOHandle) && isempty(fdetab) && (fdetab = make_fdetab(sstart, h))
-        modules.modules[sstart] = Module(h, h, fdetab)
-        ret = (sstart, modules.modules[sstart])
+        modules.modules[sstart] = Module(h, find_ehframes(h)[],
+            ehfr, h, fdetab, compute_mod_size(h))
+        Pair{UInt,Any}(sstart, modules.modules[sstart])
     end
-    ret
 end
 
 function lookup_sym(modules, name)
     name = string(name)
     for (base, h) in modules
-      symtab = ELF.Symbols(h)
+      symtab = ELF.Symbols(handle(h))
       strtab = StrTab(symtab)
       idx = findfirst(x->ELF.symname(x, strtab = strtab)==name,symtab)
       if idx != 0
@@ -196,6 +222,7 @@ module GlibcDyldModules
   using Gallium
   using ObjFileBase
   using Gallium: load, mapped_file
+  using DWARF.CallFrameInfo: EhFrameRef
 
   immutable link_map
     l_addr::RemotePtr{Void}
@@ -224,6 +251,14 @@ module GlibcDyldModules
     @assert entry_idx != 0
     #  auxv_idx = 1+2(entry_idx-1), we want auxv_idx + 1 == entry_idx
     entry_ptr = auxv[2entry_idx]
+  end
+
+  function mod_for_h(h)
+      eh_frame = Gallium.find_ehframes(h)[]
+      eh_frame_hdr = Gallium.find_eh_frame_hdr(h)
+      Gallium.Module(h, eh_frame, EhFrameRef(eh_frame_hdr, eh_frame), h,
+        Vector{Tuple{Int,UInt}}(),
+      Gallium.compute_mod_size(h))
   end
 
   """
@@ -256,7 +291,7 @@ module GlibcDyldModules
     phs = ELF.ProgramHeaders(imageh)
     idx = findfirst(p->p.p_offset==0&&p.p_type==ELF.PT_LOAD, phs)
     imagebase = phs[idx].p_vaddr + image_slide
-    modules[RemotePtr{Void}(imagebase)] = imageh
+    modules[RemotePtr{Void}(imagebase)] = mod_for_h(imageh)
 
     # Now for the shared libraries. We traverse the linked list of modules
     # in the dynamic linker's r_debug structure.
@@ -269,7 +304,8 @@ module GlibcDyldModules
             # so loading the whole thing into memory and using an IOBuffer is
             # faster
             buf = IOBuffer(open(read, mapped_file(vm, lm.l_addr)))
-            modules[lm.l_addr] = readmeta(buf)
+            h = readmeta(buf)
+            modules[lm.l_addr] = mod_for_h(h)
         end
         lm = load(vm, lm.l_next)
     end
