@@ -305,12 +305,15 @@ module GlibcDyldModules
         # Do not add to the module list if the name is empty. This is true for
         # the main executable as well as the dynamic library loader
         if load(vm, lm.l_name) != 0
-            # Don't use the IOStream directly. We do a look of seeking/poking,
-            # so loading the whole thing into memory and using an IOBuffer is
-            # faster
-            buf = IOBuffer(open(read, mapped_file(vm, lm.l_addr)))
-            h = readmeta(buf)
-            modules[lm.l_addr] = mod_for_h(h)
+            fn = mapped_file(vm, lm.l_addr)
+            if !isempty(fn)
+                # Don't use the IOStream directly. We do a look of seeking/poking,
+                # so loading the whole thing into memory and using an IOBuffer is
+                # faster
+                buf = IOBuffer(open(read, fn))
+                h = readmeta(buf)
+                modules[lm.l_addr] = mod_for_h(h)
+            end
         end
         lm = load(vm, lm.l_next)
     end
