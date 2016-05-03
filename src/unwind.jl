@@ -83,24 +83,24 @@ function frame(s, modules, r; stacktop = false)
     # CallFrameInfo.dump_program(out, fde, cie = cie, target = UInt(target_delta), rs = drs)
     rs = CallFrameInfo.evaluate_program(fde, UInt(target_delta), cie = cie, ciecache = ciecache, ccoff=ccoff)
     local cfa_addr
-    if !isnull(rs.cfa_off)
-        cfa = get(rs.cfa_off)
-        cfa_addr = RemotePtr{Void}(convert(Int, get_dwarf(r, Int(cfa[1])) + cfa[2]))
-    elseif isa(rs.cfa, CallFrameInfo.Undef)
-        error("CFA may not be undef")
+    if !CallFrameInfo.isdwarfexpr(rs.cfa)
+        if rs.cfa.flag != CallFrameInfo.Flag.Val
+            error("invalid CFA value $(rs.cfa)")
+        end
+        cfa_addr = RemotePtr{Void}(convert(Int, get_dwarf(r, Int(rs.cfa.base)) + rs.cfa.offset))
     else
         sm = DWARF.Expressions.StateMachine{typeof(unsigned(ip(r)))}()
         getreg(reg) = get_dwarf(r, reg)
         getword(addr) = get_word(s, addr)[]
         addr_func(addr) = addr
-        loc = DWARF.Expressions.evaluate_simple_location(sm, rs.cfa.opcodes, getreg, getword, addr_func, :NativeEndian)
+        loc = DWARF.Expressions.evaluate_simple_location(sm, rs.cfa_expr.opcodes, getreg, getword, addr_func, :NativeEndian)
         if isa(loc, DWARF.Expressions.RegisterLocation)
-            cfa_addr = get_dwarf(r, loc.i)
+            cfa_addr = RemotePtr{Void}(get_dwarf(r, loc.i))
         else
-            cfa_addr = loc.i
+            cfa_addr = RemotePtr{Void}(loc.i)
         end
     end
-    cfa_addr, rs, cie, UInt(target_delta)
+    cfa_addr, rs, cie, UInt64(target_delta)
 end
 
 function symbolicate(modules, ip)
@@ -133,18 +133,17 @@ function symbolicate(modules, ip)
 end
 
 function fetch_cfi_value(s, r, resolution, cfa_addr)
-    if isa(resolution, CallFrameInfo.Same)
+    if CallFrameInfo.issame(resolution)
         return get_dwarf(r, reg)
-    elseif isa(resolution, CallFrameInfo.Offset)
-        if resolution.is_val
-            return cfa_addr + resolution.n
+    elseif resolution.flag == CallFrameInfo.Flag.Val#isa(resolution, CallFrameInfo.Offset)
+        if resolution.base == CallFrameInfo.RegCFA
+            return convert(UInt64, convert(UInt64,cfa_addr)%Int64 + resolution.offset)
         else
-            return get_word(s, cfa_addr + (resolution.n % UInt))
+            return convert(UInt64, get_dwarf(r, Int(resolution.base))%Int64 + resolution.offset)
         end
-    elseif isa(resolution, CallFrameInfo.Expr)
-        error("Not implemented")
-    elseif isa(resolution, CallFrameInfo.Reg)
-        return get_dwarf(r, resolution.n)
+    elseif resolution.flag == CallFrameInfo.Flag.Deref
+        addr = RemotePtr{Ptr{Void}}(fetch_cfi_value(s, r, CallFrameInfo.RegState(resolution.base, resolution.offset, CallFrameInfo.Flag.Val), cfa_addr))
+        return get_word(s, addr)
     else
         error("Unknown resolution $resolution")
     end
@@ -174,12 +173,13 @@ function unwind_step(s, modules, r; stacktop = false, ip_only = false)
 
     # By definition, the next frame's stack pointer is our CFA
     set_sp!(new_registers, UInt(cfa))
-    isa(rs[cie.return_reg], CallFrameInfo.Undef) && return (false, r)
+    CallFrameInfo.isundef(rs[cie.return_reg]) && return (false, r)
     # Find current frame's return address, (i.e. the new frame's ip)
     set_ip!(new_registers, fetch_cfi_value(s, r, rs[cie.return_reg], cfa))
     # Now set other registers recorded in the CFI
     if !ip_only
-        for (reg, resolution) in rs.values
+        for reg in keys(rs.values)
+            resolution = rs.values[reg]
             reg == cie.return_reg && continue
             set_dwarf!(new_registers, reg, fetch_cfi_value(s, r, resolution, cfa))
         end
