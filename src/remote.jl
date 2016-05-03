@@ -35,5 +35,8 @@ function load{T}(session::LocalSession, ptr::RemotePtr{T})
     unsafe_load(Ptr{T}(ptr.ptr))
 end
 
+function write_mem
+end
+
 function mapped_file
 end

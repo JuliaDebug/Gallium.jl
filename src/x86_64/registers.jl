@@ -84,4 +84,5 @@ module X86_64
     return RC
   end
 
+  include("instemulate.jl")
 end
