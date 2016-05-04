@@ -20,7 +20,6 @@ for f in (:+, :-)
     @eval ($f){T}(i::Integer,ptr::RemotePtr{T}) = RemotePtr{T}(($f)(i,ptr.ptr))
 end
 
-
 # TODO: It's not entirely clear that this distinction is needed or useful,
 # but it's present in RR, so is included in this abstract interface for
 # compatibility
@@ -39,4 +38,45 @@ function write_mem
 end
 
 function mapped_file
+end
+
+# Remapping
+immutable Remap
+    addr::RemotePtr{Void}
+    size::UInt64
+    data::Vector{UInt8}
+end
+
+immutable TransparentRemap{T}
+    inferior::T
+    remaps::Vector{Remap}
+end
+
+function load{T}(tr::TransparentRemap, ptr::RemotePtr{T})
+    sz = sizeof(T)
+    for remap in tr.remaps
+        if UInt(remap.addr) <= UInt(ptr) &&
+            UInt(ptr) + sz <= UInt(remap.addr) + remap.size
+            offs = UInt(ptr) - UInt(remap.addr)
+            return unsafe_load(Ptr{T}(pointer(remap.data)+offs))
+        end
+    end
+    unsafe_load(tr.inferior, ptr)
+end
+
+function write_mem{T}(tr::TransparentRemap, ptr::RemotePtr{T}, val::T)
+    sz = sizeof(T)
+    for remap in tr.remaps
+        if UInt(remap.addr) <= UInt(ptr) &&
+            UInt(ptr) + sz <= UInt(remap.addr) + remap.size
+            offs = UInt(ptr) - UInt(remap.addr)
+            unsafe_store!(Ptr{T}(pointer(remap.data)+offs), val)
+            return nothing
+        end
+    end
+    write_mem(tr.inferior, ptr, val)
+    nothing
+end
+
+function write_mem
 end
