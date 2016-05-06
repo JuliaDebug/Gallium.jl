@@ -38,14 +38,18 @@ module Gallium
         ip::Ptr{Void}
         file::AbstractString
         line::Int
+        declfile::AbstractString
+        declline::Int
         stacktop::Bool
     end
 
     # Fake "Interpreter" that is just a native stack
     immutable NativeStack
         stack
+        RCs
         modules
     end
+    NativeStack(stack::Vector) = NativeStack(stack,Any[],active_modules)
 
     ASTInterpreter.done!(stack::NativeStack) = nothing
 
@@ -110,27 +114,49 @@ module Gallium
         return false
     end
 
+    function modbaseip_for_stack(state, stack)
+        modules = state.top_interp.modules
+        stack = isa(stack, NativeStack) ? stack.stack[end] : stack
+        ip = stack.ip - (stack.stacktop ? 0 : 1)
+        base, mod = find_module(modules, ip)
+        mod, base, ip
+    end
+
+    function ASTInterpreter.execute_command(state, stack::GalliumFrame, ::Val{:handle}, command)
+        Base.LineEdit.transition(state.s, :abort)
+        mod, _, __ = modbaseip_for_stack(state, stack)
+        eval(Main,:(h = $(handle(mod))))
+        return false
+    end
+    
+    function compute_ip(handle, base, theip)
+        if isa(handle, ELF.ELFHandle) && ObjFileBase.isexecutable(handle)
+            phs = ELF.ProgramHeaders(handle)
+            idx = findfirst(p->p.p_offset==0&&p.p_type==ELF.PT_LOAD, phs)
+            UInt(theip + (phs[idx].p_vaddr - base))
+        else
+            UInt(theip - base)
+        end
+    end
+
+    function ASTInterpreter.execute_command(state, stack::GalliumFrame,
+            cmd::Union{Val{:cu},Val{:sp}}, command)
+        mod, base, ip = modbaseip_for_stack(state, stack)
+        dbgs = debugsections(dhandle(mod))
+        lip = compute_ip(dhandle(mod), base, ip)
+        unit = DWARF.searchcuforip(dbgs, UInt(lip))
+        (cmd == Val{:sp}()) && (unit = DWARF.searchspforip(unit, UInt(lip)))
+        AbstractTrees.print_tree(show, IOContext(STDOUT,:strtab=>StrTab(dbgs.debug_str)), unit)
+        return false
+    end
+
     # Use this hook to expose extra functionality
     function ASTInterpreter.execute_command(x::JuliaStackFrame, command)
         lip = UInt(x.ip)-x.sstart-1
         if isrelocatable(handle(x.oh))
             lip = UInt(x.ip)-1
         end
-        if command == "handle"
-            eval(Main,:(h = $(x.oh)))
-            error()
-        elseif command == "sp"
-            dbgs = debugsections(dhandle(x.oh))
-            cu = DWARF.searchcuforip(dbgs, lip)
-            sp = DWARF.searchspforip(cu, lip)
-            AbstractTrees.print_tree(show, IOContext(STDOUT,:strtab=>StrTab(dbgs.debug_str)), sp)
-            return
-        elseif command == "cu"
-            dbgs = debugsections(dhandle(x.oh))
-            cu = DWARF.searchcuforip(dbgs, lip)
-            AbstractTrees.print_tree(show, IOContext(STDOUT,:strtab=>StrTab(dbgs.debug_str)), cu)
-            return
-        elseif command == "ip"
+        if command == "ip"
             println(x.ip)
             return
         elseif command == "sstart"
@@ -231,16 +257,20 @@ module Gallium
         UInt(unsafe_load(typetypeptr))&(~UInt(0x3)) == UInt(pointer_from_objref(DataType))
     end
 
-    function stackwalk(RC, session = LocalSession(), modules = active_modules; fromhook = false, rich_c = false, ip_only = false)
+    function stackwalk(RC, session = LocalSession(), modules = active_modules;
+            fromhook = false, rich_c = false, ip_only = false, collectRCs=false)
         stack = Any[]
+        RCs = Any[]
         firstframe = true
         (fromhook ? rec_backtrace_hook : rec_backtrace)(RC, session, modules, ip_only) do RC
+            collectRCs && push!(RCs, copy(RC))
             theip = reinterpret(Ptr{Void},UInt(ip(RC)))
             ipinfo = (ccall(:jl_lookup_code_address, Any, (Ptr{Void}, Cint),
               theip-1, 0))
             fromC = ipinfo[7]
             file = ""
             line = 0
+            local declfile="", declline=0
             if fromC
                 sstart, h = try
                     find_module(modules, theip)
@@ -248,16 +278,17 @@ module Gallium
                     return false
                 end
                 if rich_c
-                    lip = UInt(theip)-sstart-1
                     dh = dhandle(h)
-                    dbgs,cu,sp = try
-                        (debugsections(dh),
-                            DWARF.searchcuforip(dbgs, lip),
-                            DWARF.searchspforip(cu, lip))
+                    lip = compute_ip(dh, sstart, theip-1)
+                    local dbgs=nothing, cu=nothing, sp=nothing
+
+                    try
+                        dbgs = debugsections(dh)
+                        cu = DWARF.searchcuforip(dbgs, lip)
+                        sp = DWARF.searchspforip(cu, lip)
                     catch
-                        (nothing, nothing, nothing)
                     end
-                    if dbgs !== nothing
+                    if sp !== nothing
                         # Process Compilation Unit to get line table
                         line_offset = DWARF.extract_attribute(cu, DWARF.DW_AT_stmt_list)
                         line_offset = isnull(line_offset) ? 0 : convert(UInt, get(line_offset).value)
@@ -268,9 +299,14 @@ module Gallium
                         line = entry.line
                         fileentry = linetab.header.file_names[entry.file]
                         file = fileentry.name
+                        
+                        declfile = DWARF.extract_attribute(sp, DWARF.DW_AT_decl_file)
+                        declfile = isnull(declfile) ? "" : linetab.header.file_names[convert(UInt,get(declfile))].name
+                        declline = DWARF.extract_attribute(sp, DWARF.DW_AT_decl_line)
+                        declline = isnull(declline) ? 0 : convert(UInt, get(declline))
                     end
                 end
-                push!(stack, CStackFrame(theip, file, line, firstframe))
+                push!(stack, CStackFrame(theip, file, line, declfile, declline, firstframe))
             else
                 sstart, h = find_module(modules, theip)
                 ipinfo[6] == nothing && return
@@ -390,7 +426,7 @@ module Gallium
             firstframe = false
             return true
         end
-        reverse!(stack)
+        (reverse!(stack), reverse!(RCs))
     end
 
     function matches_condition(interp, condition)
@@ -432,7 +468,7 @@ module Gallium
         if !process_lowlevel_conditionals(Location(LocalSession(), hook.addr), RC)
             return
         end
-        stack = stackwalk(RC; fromhook = true)
+        stack = stackwalk(RC; fromhook = true)[1]
         stacktop = pop!(stack)
         linfo = stacktop.linfo
         argnames = linfo.slotnames[2:linfo.nargs]
@@ -704,13 +740,13 @@ module Gallium
     function breakpoint()
         RC = Hooking.getcontext()
         # -2 to skip getcontext and breakpoint()
-        ASTInterpreter.RunDebugREPL(NativeStack(filter(x->isa(x,JuliaStackFrame),stackwalk(RC; fromhook = true)[1:end-2],active_modules)))
+        ASTInterpreter.RunDebugREPL(NativeStack(filter(x->isa(x,JuliaStackFrame),stackwalk(RC; fromhook = true)[1:end-2])))
     end
 
     function breakpoint_on_error_hit(thehook, RC)
         unhook(thehook)
         err = unsafe_pointer_to_objref(Ptr{Void}(RC.rdi[]))
-        stack = stackwalk(RC; fromhook = true)
+        stack = stackwalk(RC; fromhook = true)[1]
         ips = [x.ip-1 for x in stack]
         Base.with_output_color(:red, STDERR) do io
             print(io, "ERROR: ")
@@ -718,7 +754,7 @@ module Gallium
             println(io)
         end
         println(STDOUT)
-        ASTInterpreter.RunDebugREPL(NativeStack(filter(x->isa(x,JuliaStackFrame),stack),active_modules))
+        ASTInterpreter.RunDebugREPL(NativeStack(filter(x->isa(x,JuliaStackFrame),stack)))
         # Get a somewhat sensible backtrace when returning
         try; throw(); catch; end
         hook(thehook)

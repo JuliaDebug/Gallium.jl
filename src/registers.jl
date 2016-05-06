@@ -1,5 +1,6 @@
 module Registers
-
+    
+  using Gallium
   export RegisterValue, RegisterSet
   abstract RegisterSet
   import Base: convert, getindex, -, +
@@ -46,5 +47,10 @@ module Registers
   function set_ip! end
   function set_dwarf! end
   function get_dwarf end
+
+  # Convenience fallback
+  function get_dwarf(RC, sym::Symbol)
+     get_dwarf(RC, Gallium.X86_64.inverse_dwarf[sym]) 
+  end
 
 end

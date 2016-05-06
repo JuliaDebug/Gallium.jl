@@ -77,6 +77,3 @@ function write_mem{T}(tr::TransparentRemap, ptr::RemotePtr{T}, val::T)
     write_mem(tr.inferior, ptr, val)
     nothing
 end
-
-function write_mem
-end

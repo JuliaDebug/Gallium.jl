@@ -3,7 +3,7 @@ module X86_64
   abstract RegisterSet <: Registers.RegisterSet
   using MachO
 
-  # See zhttp://www.x86-64.org/documentation/abi-0.99.7.pdf
+  # See http://www.x86-64.org/documentation/abi-0.99.7.pdf
   const dwarf_numbering = Dict{Int, Symbol}(
   0  => :rax,   1  => :rdx,   2  => :rcx,
   3  => :rbx,   4  => :rsi,   5  => :rdi,
@@ -23,7 +23,9 @@ module X86_64
   const basic_regs = 0:16
 
   const gdb_numbering = Dict{Int, Symbol}(
-    (i => dwarf_numbering[i] for i in basic_regs)...)
+     0 => :rax, 1 => :rbx, 2 => :rcx, 3 => :rdx,
+     4 => :rsi, [i=>dwarf_numbering[i] for i in 5:16]...
+  )
   const inverse_gdb = map(p->p[2]=>p[1], gdb_numbering)
 
   # This operation can be performance critical, precompute it.
@@ -65,7 +67,7 @@ module X86_64
       (reg <= endof(basic_regs)) && setfield!(regs, reg+1, RegisterValue{UInt64}(value))
   end
 
-  function Registers.get_dwarf(regs::BasicRegs, reg)
+  function Registers.get_dwarf(regs::BasicRegs, reg::Integer)
       (reg <= endof(basic_regs)) ? getfield(regs, reg+1) :
         RegisterValue{UInt64}(0, 0)
   end

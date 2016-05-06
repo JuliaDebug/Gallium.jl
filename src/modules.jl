@@ -200,6 +200,13 @@ function find_module(modules::LazyLocalModules, ip)
 end
 
 function lookup_sym(modules, name)
+    ret = lookup_syms(modules, name)
+    length(ret) && error("Not found")
+    ret[]
+end
+
+function lookup_syms(modules, name, n = typemax(UInt))
+    ret = Any[]
     name = string(name)
     for (base, h) in modules
       symtab = ELF.Symbols(handle(h))
@@ -210,12 +217,12 @@ function lookup_sym(modules, name)
           if ELF.isundef(sym)
               continue
           end
-          return (h, base, sym)
+          push!(ret,(h, base, sym))
+          length(ret) >= n && return ret
       end
     end
-    error("Not found")
+    ret
 end
-
 
 """
 Load the set of active modules from the GlibC dynamic linker
