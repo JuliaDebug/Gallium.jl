@@ -217,7 +217,7 @@ module Gallium
 
     function rec_backtrace(RC)
         ips = Array(UInt64, 0)
-        rec_backtrace(RC->push!(ips,ip(RC)), RC)
+        rec_backtrace(RC->(push!(ips,ip(RC)); true), RC)
         ips
     end
 
@@ -721,7 +721,7 @@ module Gallium
 
     function breakpoint(f)
         bp = Breakpoint()
-        Base.visit(methods(f)) do meth
+        for meth in methods(f)
             add_meth_to_bp!(bp, meth)
         end
         unshift!(bp.sources, MethSource(bp, typeof(f)))
