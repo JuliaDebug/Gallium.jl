@@ -80,7 +80,7 @@ function make_fdetab(base, mod)
             # For relocated ELF Objects and unlrelocated shared libraries,
             # it is an offset from the load address of the FDE (in the shared library case,
             # sh_addr == sectionoffset).
-            ip = (deref(eh_frame).sh_addr - sectionoffset(eh_frame) + initial_loc(fde)) - base
+            ip = (Int(deref(eh_frame).sh_addr) - Int(sectionoffset(eh_frame)) + Int(initial_loc(fde))) - Int(base)
         elseif isrelocatable(mod)
             # MachO eh_frame section doesn't get relocated, so it's still relative to
             # the file's local address space.
@@ -162,6 +162,9 @@ find_ehfr(h) = EhFrameRef(find_eh_frame_hdr(h), find_ehframes(h)[1])
     return false
 end
 
+@windows_only function update_shlibs!(modules)
+    return false
+end
 
 @linux_only function update_shlibs!(modules)
     return false

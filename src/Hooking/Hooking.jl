@@ -18,6 +18,29 @@ end
 region_to_array(region::MemoryRegion) =
     pointer_to_array(convert(Ptr{UInt8}, region.addr), (region.size,), false)
 
+# Windows Wrappers
+@windows_only begin
+    to_page(addr, size) =
+        (@assert size <= 4096;
+        MemoryRegion(
+            addr-(reinterpret(UInt, addr)%4096),1))
+
+    function VirtualProtect(region, perms)
+        oldPerm = Ref{UInt32}()
+        succ = ccall(:VirtualProtect,stdcall,Cint,(Ptr{Void}, Csize_t, UInt32, Ptr{UInt32}), region.addr, 4096, perms, oldPerm)
+        succ == 0 && error(Libc.GetLastError())
+        nothing
+    end
+
+    const PAGE_EXECUTE_READ      = 0x20
+    const PAGE_EXECUTE_READWRITE = 0x40
+    const PAGE_EXECUTE_WRITECOPY = 0x80
+    const PAGE_NOACCESS          = 0x01
+
+    const MEM_COMMIT             = 0x1000
+    const MEM_RESERVE            = 0x2000
+end
+
 # mach vm wrappers
 @osx_only begin
 
@@ -125,6 +148,7 @@ end
 # The text section of jumpto-x86_64-macho.o
 @osx_only const resume_length = 0x5b
 @linux_only const resume_length = 0x5b
+@windows_only const resume_length = 0x5b
 
 function hook_asm_template(addr)
     [
@@ -220,8 +244,16 @@ function __init__()
         Base.systemerror("mmap", reinterpret(Int, region.addr) == -1)
         region_to_array(region)
     end
+    @windows_only callback_rwx = begin
+        region = MemoryRegion(ccall(:VirtualAlloc, Ptr{Void},
+            (Ptr{Void}, Csize_t, UInt32, UInt32),
+            C_NULL, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 4096)
+        Base.systemerror("VirtualAlloc", reinterpret(Int, region.addr) == 0)
+        region_to_array(region) 
+    end
+    thecallback = Base.cfunction(callback,Void,Tuple{Ptr{Void}})::Ptr{Void}
     ccall((:hooking_jl_set_callback, hooking_lib), Void, (Ptr{Void},),
-        Base.cfunction(callback,Void,Tuple{Ptr{Void}})::Ptr{Void})
+        thecallback)
     thehook = cglobal((:hooking_jl_savecontext, hooking_lib), Ptr{UInt8})
 end
 
@@ -238,10 +270,12 @@ function allow_writing(f, region)
     @osx_only mach_check(
         mach_vm_protect(region, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE))
     @linux_only mprotect(region, PROT_READ | PROT_WRITE | PROT_EXEC)
+    @windows_only VirtualProtect(region, PAGE_EXECUTE_READWRITE)
     f()
     @osx_only mach_check(
         mach_vm_protect(region, VM_PROT_EXECUTE | VM_PROT_READ))
     @linux_only mprotect(region, PROT_READ | PROT_EXEC)
+    @windows_only VirtualProtect(region, PAGE_EXECUTE_READ)
 end
 
 function hook(callback::Function, addr)

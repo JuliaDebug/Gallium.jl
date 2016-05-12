@@ -26,3 +26,9 @@ rebuild_lib("getcontext-x86_64-macho.s","x86_64-apple-darwin15.3.0","machohook.o
 rebuild_lib("jumpto-x86_64-macho.s","x86_64-apple-darwin15.3.0","machojump.o")
 run(`clang -target x86_64-apple-darwin15.3.0 -fPIC -c -o macho-callback.o callback.c`)
 @osx_only run(`clang -target x86_64-apple-darwin15.3.0 -shared -o hooking.dylib machojump.o machohook.o macho-callback.o`)
+
+windows_triple = "x86_64-pc-windows-gnu"
+rebuild_lib("getcontext-x86_64-coff.s",windows_triple,"coffhook.o")
+rebuild_lib("jumpto-x86_64-coff.s",windows_triple,"coffjump.o")
+run(`clang -target $windows_triple -fPIC -c -o coff-callback.o callback.c`)
+@windows_only run(`clang -target $windows_triple -shared -o hooking.dll coffjump.o coffhook.o coff-callback.o`)
