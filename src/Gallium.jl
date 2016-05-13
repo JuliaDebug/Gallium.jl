@@ -6,6 +6,7 @@ module Gallium
     using ObjFileBase
     using ELF
     using MachO
+    using COFF
     using AbstractTrees
     import ASTInterpreter: @enter
 

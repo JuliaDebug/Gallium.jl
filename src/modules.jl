@@ -107,8 +107,9 @@ end
     debugh
 end
 
-find_ehframes(sects::ObjFileBase.Sections) = collect(filter(x->sectionname(x)==mangle_sname(handle(sects),"eh_frame"),sects))
-find_ehframes(h::ELF.ELFHandle) = find_ehframes(Sections(h))
+find_ehframes{T<:ELF.ELFHandle}(sects::ObjFileBase.Sections{T}) = collect(filter(x->sectionname(x)==mangle_sname(handle(sects),"eh_frame"),sects))
+find_ehframes{T<:COFF.COFFHandle}(sects::ObjFileBase.Sections{T}) = collect(filter(x->sectionname(x)==mangle_sname(handle(sects),"debug_frame"),sects))
+find_ehframes(h::ObjFileBase.ObjectHandle) = find_ehframes(Sections(h))
 function find_ehframes(h::MachO.MachOHandle)
     mapreduce(x->find_ehframes(Sections(x)), vcat,
         filter(x->isa(deref(x), MachO.segment_commands), LoadCmds(h)))

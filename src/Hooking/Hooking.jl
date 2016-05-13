@@ -32,6 +32,30 @@ region_to_array(region::MemoryRegion) =
         nothing
     end
 
+    immutable MEMORY_BASIC_INFORMATION64
+        BaseAddress::UInt64
+        AllocationBase::UInt64
+        AllocationProtect::UInt32
+        __alignment1::UInt32
+        RegionSize::UInt64
+        State::UInt32
+        Protect::UInt32
+        Type::UInt32
+        __alignment2::UInt32
+    end
+
+    function mem_validate(addr, length)
+        ret = Ref{MEMORY_BASIC_INFORMATION64}()
+        succ = ccall(:VirtualQuery, stdcall, Cint, (Ptr{Void}, Ptr{MEMORY_BASIC_INFORMATION64}, Csize_t), Ptr{Void}(addr), ret, sizeof(MEMORY_BASIC_INFORMATION64))
+        if succ == 0
+            error(Libc.GetLastError())
+        end
+        @show ret[].Protect
+        (ret[].Protect & (PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_READONLY | PAGE_READWRITE)) != 0
+    end
+
+    const PAGE_READWRITE         = 0x04
+    const PAGE_READONLY          = 0x02
     const PAGE_EXECUTE_READ      = 0x20
     const PAGE_EXECUTE_READWRITE = 0x40
     const PAGE_EXECUTE_WRITECOPY = 0x80
