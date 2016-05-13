@@ -6,3 +6,4 @@ ELF
 MachO
 ASTInterpreter
 AbstractTrees
+COFF
