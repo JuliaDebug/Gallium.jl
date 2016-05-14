@@ -50,6 +50,7 @@ If you wish to run the latest development version, you may also require the deve
 dependencies. The appropriate command to move to these development versions is provided below for convencience.
 However, it is **strongly** recommended that most users make use of the released version instead.
 ```
+Pkg.clone("https://github.com/Keno/COFF.jl")
 Pkg.checkout("Reactive")
 Pkg.checkout("ObjFileBase")
 Pkg.checkout("StructIO")
