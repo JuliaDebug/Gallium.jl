@@ -234,6 +234,73 @@ function lookup_syms(modules, name, n = typemax(UInt))
 end
 
 """
+Load the set of active moudles from the Win64 dynamic linker
+"""
+module Win64DyldMoudles
+    using COFF
+    using Gallium
+    using ObjFileBase
+    using Gallium: load, mapped_file
+    using DWARF.CallFrameInfo
+    using DWARF.CallFrameInfo: EhFrameRef
+    import Base: start, next, done
+
+    function get_peb_addr
+    end
+
+    # See https://msdn.microsoft.com/en-us/library/windows/desktop/aa813706(v=vs.85).aspx
+    immutable LDR_DATA_TABLE_ENTRY
+        Prev::RemotePtr{LDR_DATA_TABLE_ENTRY}
+        Next::RemotePtr{LDR_DATA_TABLE_ENTRY}
+        Reserved::NTuple{4,RemotePtr{Void}}
+        DllBase::RemotePtr{Void}
+        EntryPoint::RemotePtr{Void}
+        Reserved3::RemotePtr{Void}
+        FullDllName::RemotePtr{UInt8}
+    end
+
+    immutable ModuleIterator
+        vm
+        head::RemotePtr{LDR_DATA_TABLE_ENTRY}
+    end
+
+    function mod_for_h(h)
+        eh_frame = Gallium.find_ehframes(h)[]
+        eh_frame_hdr = Gallium.find_eh_frame_hdr(h)
+        Gallium.Module(h, eh_frame, EhFrameRef(eh_frame_hdr, eh_frame), h,
+          Vector{Tuple{Int,UInt}}(),
+          CallFrameInfo.precompute(eh_frame),
+          Gallium.compute_mod_size(h))
+    end
+
+    function ModuleIterator(vm)
+        addr = get_peb_addr(vm)
+        peb_ldr_data_addr = load(vm, RemotePtr{UInt64}(addr + 24))
+        head = peb_ldr_data_addr + 32
+        ModuleIterator(vm, RemotePtr{LDR_DATA_TABLE_ENTRY}(head))
+    end
+
+    start(m::ModuleIterator) = load(m.vm, RemotePtr{RemotePtr{LDR_DATA_TABLE_ENTRY}}(m.head))
+    function next(m::ModuleIterator, s::RemotePtr{LDR_DATA_TABLE_ENTRY})
+        entry = load(m.vm, s-16)
+        (entry, entry.Next)
+    end
+    done(m::ModuleIterator, s::RemotePtr{LDR_DATA_TABLE_ENTRY}) =
+        s == m.head
+    Base.iteratorsize(::Type{ModuleIterator}) = Base.SizeUnknown()
+
+    function load_library_map(vm)
+        modules = Dict{RemotePtr{Void},Any}()
+        map(ModuleIterator(vm)) do entry
+            fn = mapped_file(vm, entry.DllBase)
+            if !isempty(fn)
+                modules[entry.DllBase] = mod_for_h(readmeta(IOBuffer(open(read, fn))))
+            end
+        end
+    end
+end
+
+"""
 Load the set of active modules from the GlibC dynamic linker
 """
 module GlibcDyldModules
