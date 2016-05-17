@@ -266,9 +266,8 @@ module Gallium
         (fromhook ? rec_backtrace_hook : rec_backtrace)(RC, session, modules, ip_only) do RC
             collectRCs && push!(RCs, copy(RC))
             theip = reinterpret(Ptr{Void},UInt(ip(RC)))
-            ipinfo = (ccall(:jl_lookup_code_address, Any, (Ptr{Void}, Cint),
-              theip-1, 0))
-            fromC = ipinfo[7]
+            ipinfo = Base.StackTraces.lookup(theip)[end]
+            fromC = ipinfo.from_c
             file = ""
             line = 0
             local declfile="", declline=0
@@ -310,8 +309,8 @@ module Gallium
                 push!(stack, CStackFrame(theip, file, line, declfile, declline, firstframe))
             else
                 sstart, h = find_module(modules, theip)
-                ipinfo[6] == nothing && return
-                tlinfo = ipinfo[6]::LambdaInfo
+                isnull(ipinfo.linfo) && return
+                tlinfo = get(ipinfo.linfo)
                 env = ASTInterpreter.prepare_locals(tlinfo)
                 copy!(env.sparams, tlinfo.sparam_vals)
                 variables = Dict()
@@ -422,7 +421,7 @@ module Gallium
                 end
                 # process SP.variables here
                 #h = readmeta(IOBuffer(data))
-                push!(stack, JuliaStackFrame(h, file, UInt(ip(RC)), sstart, line, ipinfo[6], variables, env))
+                push!(stack, JuliaStackFrame(h, file, UInt(ip(RC)), sstart, line, get(ipinfo.linfo), variables, env))
             end
             firstframe = false
             return true
@@ -518,13 +517,11 @@ module Gallium
     Breakpoint() = Breakpoint(Location[], Location[], LocationSource[], false, Any[])
 
     function print_location(io::IO, vm::LocalSession, loc)
-        ipinfo = (ccall(:jl_lookup_code_address, Any, (UInt, Cint),
-            loc.addr, 0))
-        fromC = ipinfo[7]
-        if fromC
+        ipinfo = Base.StackTraces.lookup(loc.addr+1)[end]
+        if ipinfo.from_c
             println(io, "At address ", loc.addr)
         else
-            linfo = ipinfo[6]::LambdaInfo
+            linfo = get(ipinfo.linfo)
             ASTInterpreter.print_linfo_desc(io, linfo, true)
             println(io)
         end
