@@ -114,11 +114,16 @@ module Gallium
         CallFrameInfo.dump_program(out, fde, cie = cie, target = UInt(target_delta), rs = drs)
         return false
     end
+    
+    function find_module(modules, frame::CStackFrame)
+        ip = frame.ip - (frame.stacktop ? 0 : 1)
+        base, mod = find_module(modules, ip)
+    end
 
     function modbaseip_for_stack(state, stack)
         modules = state.top_interp.modules
-        stack = isa(stack, NativeStack) ? stack.stack[end] : stack
-        ip = stack.ip - (stack.stacktop ? 0 : 1)
+        frame = isa(stack, NativeStack) ? stack.stack[end] : stack
+        ip = frame.ip - (frame.stacktop ? 0 : 1)
         base, mod = find_module(modules, ip)
         mod, base, ip
     end
@@ -257,6 +262,10 @@ module Gallium
         Hooking.mem_validate(typetypeptr,sizeof(Ptr)) || return false
         UInt(unsafe_load(typetypeptr))&(~UInt(0x3)) == UInt(pointer_from_objref(DataType))
     end
+    
+    function get_ipinfo(session::LocalSession, theip)
+	       Base.StackTraces.lookup(theip)
+    end
 
     function stackwalk(RC, session = LocalSession(), modules = active_modules;
             fromhook = false, rich_c = false, ip_only = false, collectRCs=false)
@@ -266,7 +275,7 @@ module Gallium
         (fromhook ? rec_backtrace_hook : rec_backtrace)(RC, session, modules, ip_only) do RC
             collectRCs && push!(RCs, copy(RC))
             theip = reinterpret(Ptr{Void},UInt(ip(RC)))
-            ipinfo = Base.StackTraces.lookup(theip)[end]
+            ipinfo = get_ipinfo(session, theip)[end]
             fromC = ipinfo.from_c
             file = ""
             line = 0
@@ -274,7 +283,8 @@ module Gallium
             if fromC
                 sstart, h = try
                     find_module(modules, theip)
-                catch # Unwind got it wrong
+                catch # Unwind got it wrong, but still include at least one stack frame
+                    push!(stack, CStackFrame(theip, file, line, declfile, declline, firstframe))
                     return false
                 end
                 if rich_c
@@ -556,7 +566,7 @@ module Gallium
     function disable(bp::Breakpoint, loc::Location)
         pop!(bps_at_location[loc],bp)
         if isempty(bps_at_location[loc])
-            unhook(Ptr{Void}(loc.addr))
+            disable(loc)
             delete!(bps_at_location,loc)
         end
     end

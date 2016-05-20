@@ -34,6 +34,10 @@ function load{T}(session::LocalSession, ptr::RemotePtr{T})
     unsafe_load(Ptr{T}(ptr.ptr))
 end
 
+function store!{T}(session::LocalSession, ptr::RemotePtr{T}, val::T)
+    unsafe_store!(Ptr{T}(ptr.ptr), val)
+end
+
 function write_mem
 end
 

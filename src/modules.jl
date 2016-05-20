@@ -210,7 +210,7 @@ end
 
 function lookup_sym(modules, name)
     ret = lookup_syms(modules, name)
-    length(ret) && error("Not found")
+    length(ret) == 0 && error("Not found")
     ret[]
 end
 
@@ -240,7 +240,7 @@ module Win64DyldMoudles
     using COFF
     using Gallium
     using ObjFileBase
-    using Gallium: load, mapped_file
+    using Gallium: load, mapped_file, make_fdetab
     using DWARF.CallFrameInfo
     using DWARF.CallFrameInfo: EhFrameRef
     import Base: start, next, done
@@ -264,13 +264,11 @@ module Win64DyldMoudles
         head::RemotePtr{LDR_DATA_TABLE_ENTRY}
     end
 
-    function mod_for_h(h)
+    function mod_for_h(dllbase, h)
         eh_frame = Gallium.find_ehframes(h)[]
-        eh_frame_hdr = Gallium.find_eh_frame_hdr(h)
-        Gallium.Module(h, eh_frame, EhFrameRef(eh_frame_hdr, eh_frame), h,
-          Vector{Tuple{Int,UInt}}(),
-          CallFrameInfo.precompute(eh_frame),
-          Gallium.compute_mod_size(h))
+        fdetab = make_fdetab(dllbase, h)
+        Gallium.Module(h, eh_frame, Nullable{EhFrameRef}, h,
+          fdetab, CallFrameInfo.precompute(eh_frame), Gallium.compute_mod_size(h))
     end
 
     function ModuleIterator(vm)
@@ -294,7 +292,8 @@ module Win64DyldMoudles
         map(ModuleIterator(vm)) do entry
             fn = mapped_file(vm, entry.DllBase)
             if !isempty(fn)
-                modules[entry.DllBase] = mod_for_h(readmeta(IOBuffer(open(read, fn))))
+                modules[entry.DllBase] = mod_for_h(entry.DllBase,
+                    readmeta(IOBuffer(open(read, fn))))
             end
         end
     end

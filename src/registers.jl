@@ -53,4 +53,8 @@ module Registers
      get_dwarf(RC, Gallium.X86_64.inverse_dwarf[sym]) 
   end
 
+  function set_dwarf!(RC, sym::Symbol, val)
+     set_dwarf!(RC, Gallium.X86_64.inverse_dwarf[sym], val)
+  end
+
 end

@@ -111,22 +111,22 @@ immutable Frame
     target_delta::UInt64
 end
 
-function evaluate_cfa_expr(s, r, rs)
-    sm = DWARF.Expressions.StateMachine{typeof(unsigned(ip(r)))}()
+function evaluate_cfi_expr(opcodes, s, r, rs)
+    sm = DWARF.Expressions.StateMachine{UInt64}() # typeof(unsigned(ip(r)))
     getreg(reg) = get_dwarf(r, reg)
-    getword(addr) = get_word(s, addr)[]
+    getword(addr) = get_word(s, RemotePtr{UInt64}(addr))[]
     addr_func(addr) = addr
-    loc = DWARF.Expressions.evaluate_simple_location(sm, rs.cfa_expr.opcodes, getreg, getword, addr_func, :NativeEndian)
+    loc = DWARF.Expressions.evaluate_simple_location(sm, opcodes, getreg, getword, addr_func, :NativeEndian)
     if isa(loc, DWARF.Expressions.RegisterLocation)
-        cfa_addr = RemotePtr{Void}(get_dwarf(r, loc.i))
+        addr = RemotePtr{Void}(get_dwarf(r, loc.i))
     else
-        cfa_addr = RemotePtr{Void}(loc.i)
+        addr = RemotePtr{Void}(loc.i)
     end
-    cfa_addr
+    addr
 end
+evaluate_cfa_expr(s, r, rs) = evaluate_cfi_expr(rs.cfa_expr.opcodes, s, r, rs)
 
-function frame(s, modules, r, stacktop :: Bool, cfi_cache)
-    rs, cie, target_delta = compute_register_states(s, modules, r, stacktop, cfi_cache)::CFICacheEntry
+function compute_cfa_addr(s, r, rs)
     local cfa_addr
     if !CallFrameInfo.isdwarfexpr(rs.cfa)
         if rs.cfa.flag != CallFrameInfo.Flag.Val
@@ -136,7 +136,11 @@ function frame(s, modules, r, stacktop :: Bool, cfi_cache)
     else
         cfa_addr = evaluate_cfa_expr(s, r, rs)
     end
-    Frame(cfa_addr, rs, cie, UInt64(target_delta))
+end
+
+function frame(s, modules, r, stacktop :: Bool, cfi_cache)
+    rs, cie, target_delta = compute_register_states(s, modules, r, stacktop, cfi_cache)::CFICacheEntry
+    Frame(compute_cfa_addr(s, r, rs), rs, cie, UInt64(target_delta))
 end
 
 function symbolicate(modules, ip)
@@ -168,21 +172,33 @@ function symbolicate(modules, ip)
     symname(syms[idx]; strtab = StrTab(syms))
 end
 
-function fetch_cfi_value(s, r, resolution, cfa_addr)
-    if CallFrameInfo.issame(resolution)
+function fetch_cfi_val_value(s, r, resolution, cfa_addr)
+    if resolution.base == CallFrameInfo.RegCFA
+        return convert(UInt64, convert(UInt64,cfa_addr)%Int64 + resolution.offset)
+    else
+        return convert(UInt64, get_dwarf(r, Int(resolution.base))%Int64 + resolution.offset)
+    end
+end
+
+function fetch_cfi_value(s, r, rs, reg, cfa_addr)
+    resolution = rs.values[reg]
+    if CallFrameInfo.isdwarfexpr(resolution)
+        ve = rs.values_expr[reg]
+        val = evaluate_cfi_expr(ve.opcodes, s, r, rs)
+        ve.is_val || (val = get_word(s,RemotePtr{UInt64}(val)))
+        return val
+    elseif CallFrameInfo.issame(resolution)
         return get_dwarf(r, reg)
     elseif resolution.flag == CallFrameInfo.Flag.Val#isa(resolution, CallFrameInfo.Offset)
-        if resolution.base == CallFrameInfo.RegCFA
-            return convert(UInt64, convert(UInt64,cfa_addr)%Int64 + resolution.offset)
-        else
-            return convert(UInt64, get_dwarf(r, Int(resolution.base))%Int64 + resolution.offset)
-        end
+        return fetch_cfi_val_value(s, r, resolution, cfa_addr)
     elseif resolution.flag == CallFrameInfo.Flag.Deref
-        addr = RemotePtr{Ptr{Void}}(fetch_cfi_value(s, r, CallFrameInfo.RegState(resolution.base, resolution.offset, CallFrameInfo.Flag.Val), cfa_addr))
+        new_resolution = CallFrameInfo.RegState(resolution.base, resolution.offset, CallFrameInfo.Flag.Val)
+        addr = RemotePtr{Ptr{Void}}(fetch_cfi_val_value(s, r, new_resolution, cfa_addr))
         return get_word(s, addr)
     else
         error("Unknown resolution $resolution")
     end
+
 end
 function unwind_step(s, modules, r, cfi_cache = nothing; stacktop = false, ip_only = false)
     new_registers = copy(r)
@@ -210,13 +226,13 @@ function unwind_step(s, modules, r, cfi_cache = nothing; stacktop = false, ip_on
     set_sp!(new_registers, UInt(cf.cfa_addr))
     CallFrameInfo.isundef(cf.rs[cf.cie.return_reg]) && return (false, r)
     # Find current frame's return address, (i.e. the new frame's ip)
-    set_ip!(new_registers, fetch_cfi_value(s, r, cf.rs[cf.cie.return_reg], cf.cfa_addr))
+    set_ip!(new_registers, fetch_cfi_value(s, r, cf.rs, cf.cie.return_reg, cf.cfa_addr))
     # Now set other registers recorded in the CFI
     if !ip_only
         for reg in keys(cf.rs.values)
             resolution = cf.rs.values[reg]
             reg == cf.cie.return_reg && continue
-            set_dwarf!(new_registers, reg, fetch_cfi_value(s, r, resolution, cf.cfa_addr))
+            set_dwarf!(new_registers, reg, fetch_cfi_value(s, r, cf.rs, reg, cf.cfa_addr))
         end
     end
     UInt(ip(new_registers)) == 0 &&  return (false, r)
