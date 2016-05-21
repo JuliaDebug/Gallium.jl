@@ -1,5 +1,4 @@
-
-if OS_NAME == :Darwin
+@static if is_apple()
     const unw_getcontext = :unw_getcontext
     const unw_init = :unw_init_local_dwarf
     const unw_step = :unw_step

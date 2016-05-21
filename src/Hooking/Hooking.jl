@@ -10,7 +10,9 @@ typealias MachTask Ptr{Void}
 typealias KernReturn UInt32
 
 immutable MemoryRegion
-    @osx_only task::MachTask
+    @static if is_apple()
+        task::MachTask
+    end
     addr::Ptr{Void}
     size::UInt64
 end
@@ -19,7 +21,7 @@ region_to_array(region::MemoryRegion) =
     pointer_to_array(convert(Ptr{UInt8}, region.addr), (region.size,), false)
 
 # Windows Wrappers
-@windows_only begin
+@static if is_windows()
     to_page(addr, size) =
         (@assert size <= 4096;
         MemoryRegion(
@@ -66,7 +68,7 @@ region_to_array(region::MemoryRegion) =
 end
 
 # mach vm wrappers
-@osx_only begin
+@static if is_apple()
 
     mach_task_self() = ccall(:mach_task_self,MachTask,())
 
@@ -135,7 +137,7 @@ end
 
 end
 
-@linux_only begin
+@static if is_linux()
     to_page(addr, size) = (@assert size <= 4096;
         MemoryRegion(addr-(reinterpret(UInt, addr)%4096),1))
 
@@ -170,9 +172,7 @@ immutable Deopt
 end
 
 # The text section of jumpto-x86_64-macho.o
-@osx_only const resume_length = 0x5b
-@linux_only const resume_length = 0x5b
-@windows_only const resume_length = 0x5b
+const resume_length = 0x5b
 
 function hook_asm_template(addr)
     [
@@ -253,13 +253,12 @@ function __init__()
     resume_instructions = pointer_to_array(convert(Ptr{UInt8}, theresume),
         (resume_length,), false)
     # Allocate an RWX page for the callback return
-    @osx_only callback_rwx = begin
+    callback_rwx = @static if is_apple()
         region = mach_check(mach_vm_allocate(4096)...)
         mach_check(mach_vm_protect(region,
             VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE))
         region_to_array(region)
-    end
-    @linux_only callback_rwx = begin
+    elseif is_linux()
         region = MemoryRegion(ccall(:mmap, Ptr{Void},
             (Ptr{Void}, Csize_t, Cint, Cint, Cint, Csize_t),
             C_NULL, 4096, PROT_EXEC | PROT_READ | PROT_WRITE,
@@ -267,13 +266,12 @@ function __init__()
             -1, 0), 4096)
         Base.systemerror("mmap", reinterpret(Int, region.addr) == -1)
         region_to_array(region)
-    end
-    @windows_only callback_rwx = begin
+    elseif is_windows()
         region = MemoryRegion(ccall(:VirtualAlloc, Ptr{Void},
             (Ptr{Void}, Csize_t, UInt32, UInt32),
             C_NULL, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 4096)
         Base.systemerror("VirtualAlloc", reinterpret(Int, region.addr) == 0)
-        region_to_array(region) 
+        region_to_array(region)
     end
     thecallback = Base.cfunction(callback,Void,Tuple{Ptr{Void}})::Ptr{Void}
     ccall((:hooking_jl_set_callback, hooking_lib), Void, (Ptr{Void},),
@@ -291,15 +289,21 @@ end
 # is executable to begin with.
 function allow_writing(f, region)
     # On OS X, make sure that the page is mapped as COW
-    @osx_only mach_check(
-        mach_vm_protect(region, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE))
-    @linux_only mprotect(region, PROT_READ | PROT_WRITE | PROT_EXEC)
-    @windows_only VirtualProtect(region, PAGE_EXECUTE_READWRITE)
+    @static if is_apple()
+        mach_check(mach_vm_protect(region, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE))
+    elseif is_linux()
+        mprotect(region, PROT_READ | PROT_WRITE | PROT_EXEC)
+    elseif is_windows()
+        VirtualProtect(region, PAGE_EXECUTE_READWRITE)
+    end
     f()
-    @osx_only mach_check(
-        mach_vm_protect(region, VM_PROT_EXECUTE | VM_PROT_READ))
-    @linux_only mprotect(region, PROT_READ | PROT_EXEC)
-    @windows_only VirtualProtect(region, PAGE_EXECUTE_READ)
+    @static if is_apple()
+        mach_check(mach_vm_protect(region, VM_PROT_EXECUTE | VM_PROT_READ))
+    elseif is_linux()
+        mprotect(region, PROT_READ | PROT_EXEC)
+    elseif is_windows()
+        VirtualProtect(region, PAGE_EXECUTE_READ)
+    end
 end
 
 function hook(callback::Function, addr)

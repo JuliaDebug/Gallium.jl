@@ -99,12 +99,14 @@ function obtain_uuid(h)
     deref(first(filter(x->isa(deref(x),MachO.uuid_command), LoadCmds(h)))).uuid
 end
 
-@osx_only function obtain_dsym(fname, objecth)
-    dsympath = string(fname, ".dSYM/Contents/Resources/DWARF/", basename(fname))
-    isfile(dsympath) || return objecth
-    debugh = readmeta(IOBuffer(open(read, dsympath)))
-    (obtain_uuid(objecth) != obtain_uuid(debugh)) && return debugh
-    debugh
+@static if is_apple()
+    function obtain_dsym(fname, objecth)
+        dsympath = string(fname, ".dSYM/Contents/Resources/DWARF/", basename(fname))
+        isfile(dsympath) || return objecth
+        debugh = readmeta(IOBuffer(open(read, dsympath)))
+        (obtain_uuid(objecth) != obtain_uuid(debugh)) && return debugh
+        debugh
+    end
 end
 
 find_ehframes{T<:Union{ELF.ELFHandle,MachO.MachOHandle}}(sects::ObjFileBase.Sections{T}) =
@@ -126,50 +128,52 @@ find_eh_frame_hdr{T}(m::Module{T}) = (get(mod.ehfr).hdr_sec)::SectionRef(T)
 find_ehfr(mod::Module) = get(mod.ehfr)
 find_ehfr(h) = EhFrameRef(find_eh_frame_hdr(h), find_ehframes(h)[1])
 
-@osx_only function update_shlibs!(modules)
-    nactuallibs = ccall(:_dyld_image_count, UInt32, ())
-    if modules.nsharedlibs != nactuallibs
-        for idx in (modules.nsharedlibs+1):nactuallibs
-            idx -= 1
-            base = ccall(:_dyld_get_image_vmaddr_slide, UInt, (UInt32,), idx)
-            fname = bytestring(
-                ccall(:_dyld_get_image_name, Ptr{UInt8}, (UInt32,), idx))
-            # hooking is weird
-            contains(fname, "hooking.dylib") &&
-                continue
-            h = readmeta(IOBuffer(open(read, fname)))
-            if isa(h, MachO.FatMachOHandle)
-                h = h[findfirst(arch->arch.cputype == MachO.CPU_TYPE_X86_64, h.archs)]
+@static if is_apple()
+    function update_shlibs!(modules)
+        nactuallibs = ccall(:_dyld_image_count, UInt32, ())
+        if modules.nsharedlibs != nactuallibs
+            for idx in (modules.nsharedlibs+1):nactuallibs
+                idx -= 1
+                base = ccall(:_dyld_get_image_vmaddr_slide, UInt, (UInt32,), idx)
+                fname = bytestring(
+                    ccall(:_dyld_get_image_name, Ptr{UInt8}, (UInt32,), idx))
+                # hooking is weird
+                contains(fname, "hooking.dylib") &&
+                    continue
+                h = readmeta(IOBuffer(open(read, fname)))
+                if isa(h, MachO.FatMachOHandle)
+                    h = h[findfirst(arch->arch.cputype == MachO.CPU_TYPE_X86_64, h.archs)]
+                end
+                # Do not record the dynamic linker in our module list
+                # Also skip the executable for now
+                ft = readheader(h).filetype
+                if ft == MachO.MH_DYLINKER
+                    continue
+                end
+                # For now, don't record shared libraries for which we only
+                # have compact unwind info.
+                ehfs = find_ehframes(h)
+                length(collect(ehfs)) == 0 && continue
+                fdetab = make_fdetab(base, h)
+                vmaddr = first_actual_segment(h).vmaddr
+                base += vmaddr
+                modules.modules[base] = Module(h, ehfs[], Nullable{EhFrameRef}(),
+                    obtain_dsym(fname, h), fdetab, CallFrameInfo.precompute(ehfs[]),
+                    compute_mod_size(h))
             end
-            # Do not record the dynamic linker in our module list
-            # Also skip the executable for now
-            ft = readheader(h).filetype
-            if ft == MachO.MH_DYLINKER
-                continue
-            end
-            # For now, don't record shared libraries for which we only
-            # have compact unwind info.
-            ehfs = find_ehframes(h)
-            length(collect(ehfs)) == 0 && continue
-            fdetab = make_fdetab(base, h)
-            vmaddr = first_actual_segment(h).vmaddr
-            base += vmaddr
-            modules.modules[base] = Module(h, ehfs[], Nullable{EhFrameRef}(),
-                obtain_dsym(fname, h), fdetab, CallFrameInfo.precompute(ehfs[]),
-                compute_mod_size(h))
+            modules.nsharedlibs = nactuallibs
+            return true
         end
-        modules.nsharedlibs = nactuallibs
-        return true
+        return false
     end
-    return false
-end
-
-@windows_only function update_shlibs!(modules)
-    return false
-end
-
-@linux_only function update_shlibs!(modules)
-    return false
+elseif is_windows()
+    function update_shlibs!(modules)
+        return false
+    end
+elseif is_linux()
+    function update_shlibs!(modules)
+        return false
+    end
 end
 
 function find_module(modules::LazyLocalModules, ip)

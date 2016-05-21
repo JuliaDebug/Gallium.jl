@@ -309,7 +309,7 @@ module Gallium
                 push!(stack, CStackFrame(theip, file, line, declfile, declline, firstframe))
             else
                 sstart, h = find_module(modules, theip)
-                isnull(ipinfo.linfo) && return
+                isnull(ipinfo.linfo) && return false
                 tlinfo = get(ipinfo.linfo)
                 env = ASTInterpreter.prepare_locals(tlinfo)
                 copy!(env.sparams, tlinfo.sparam_vals)

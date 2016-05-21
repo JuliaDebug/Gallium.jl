@@ -23,3 +23,9 @@ function testforline(branch)
     end
     gcd(a, b)
 end
+
+
+function optional(n = sin(1))
+    x = asin(n)
+    cos(x)
+end
