@@ -16,6 +16,7 @@ module Gallium
     include("remote.jl")
     include("registers.jl")
     include("x86_64/registers.jl")
+    include("win64seh.jl")
     include("modules.jl")
     include("unwind.jl")
     include("Hooking/Hooking.jl")
@@ -155,6 +156,17 @@ module Gallium
         AbstractTrees.print_tree(show, IOContext(STDOUT,:strtab=>StrTab(dbgs.debug_str)), unit)
         return false
     end
+    
+    function ASTInterpreter.execute_command(state, stack::GalliumFrame,
+            cmd::Union{Val{:cu},Val{:seh}}, command)
+        mod, base, ip = modbaseip_for_stack(state, stack)
+        entry = Unwinder.find_seh_entry(mod, ip-base)
+        i = 1
+        while i <= length(entry.opcodes)
+            i += print_op(STDOUT, entry.opcodes, i)
+        end
+        return false
+    end
 
     # Use this hook to expose extra functionality
     function ASTInterpreter.execute_command(x::JuliaStackFrame, command)
@@ -231,11 +243,11 @@ module Gallium
     function rec_backtrace(callback, RC, session = LocalSession(), modules = active_modules, ip_only = false, cfi_cache = nothing; stacktop = true)
         callback(RC) || return
         while true
-            (ok, RC) = try
+            (ok, RC) = #try
                 Unwinder.unwind_step(session, modules, RC, cfi_cache; stacktop = stacktop, ip_only = ip_only)
-            catch e # e.g. invalid memory access, invalid unwind info etc.
-                break
-            end
+            #catch e # e.g. invalid memory access, invalid unwind info etc.
+            #    break
+            #end
             stacktop = false
             ok || break
             callback(RC) || break
@@ -264,7 +276,13 @@ module Gallium
     end
     
     function get_ipinfo(session::LocalSession, theip)
-	       Base.StackTraces.lookup(theip)
+        Base.StackTraces.lookup(theip)
+    end
+    
+    function get_ipinfo(session, theip)
+        sf = StackFrame(:unknown, "", 0, Nullable{LambdaInfo}(),
+            true, false, theip)
+        [sf]
     end
 
     function stackwalk(RC, session = LocalSession(), modules = active_modules;

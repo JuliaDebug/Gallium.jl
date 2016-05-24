@@ -4,14 +4,18 @@ using DWARF.CallFrameInfo: EhFrameRef, CIECache
 using ObjFileBase
 using ObjFileBase: handle, isrelocatable, Sections, mangle_sname
 
+
 """
 Keeps a list of local modules, lazy loading those that it doesn't have from
 the current process's address space.
 """
 immutable Module{T<:ObjFileBase.ObjectHandle, SR<:ObjFileBase.SectionRef}
     handle::T
+    # The .eh_frame section when unwinding using DWARF
     eh_frame::Nullable{SR}
+    # Either a DWARF or SEH header/unwind table pair
     ehfr::Nullable{EhFrameRef}
+    xpdata::Nullable{XPUnwindRef}
     # If the object containing this module's DWARF info is different,
     # this is the handle to it
     dwarfhandle::T
@@ -20,7 +24,8 @@ immutable Module{T<:ObjFileBase.ObjectHandle, SR<:ObjFileBase.SectionRef}
     sz::UInt
 end
 Module(handle, eh_frame, eh_frame_hdr, dwarfhandle, FDETab, ciecache, sz) =
-    Module{typeof(handle),typeof(eh_frame)}(handle, eh_frame, eh_frame_hdr, dwarfhandle, FDETab, ciecache, sz)
+    Module{typeof(handle),typeof(eh_frame)}(handle, eh_frame, eh_frame_hdr,
+        Nullable{XPUnwindRef}(), dwarfhandle, FDETab, ciecache, sz)
 
 ObjFileBase.handle(mod::Module) = mod.handle
 dhandle(mod::Module) = mod.dwarfhandle
@@ -43,6 +48,8 @@ function compute_mod_size(h)
         sz = first(filter(x->x.p_type == ELF.PT_LOAD, phs)).p_memsz
     elseif isa(handle(h), MachO.MachOHandle)
         sz = first_actual_segment(h).vmsize
+    elseif isa(handle(h), COFF.COFFHandle)
+        sz = COFF.readoptheader(handle(h)).standard.SizeOfCode
     end
     UInt(sz)
 end
@@ -69,10 +76,10 @@ end
 """
 base is the remote address of the text section
 """
-function make_fdetab(base, mod)
+function make_fdetab(base, mod, is_eh_not_debug=true)
     FDETab = Vector{Tuple{Int,UInt}}()
     eh_frame = find_ehframes(mod)[]
-    for fde in FDEIterator(eh_frame)
+    for fde in FDEIterator(eh_frame,is_eh_not_debug)
         # Make this location, relative to base. Note that base means something different,
         # depending on whether we're isrelocatable or not. If we are, base is the load address
         # of the text section. Otherwise, base is the load address of the start of the mapping.
@@ -234,79 +241,13 @@ function lookup_syms(modules, name, n = typemax(UInt))
 end
 
 """
-Load the set of active moudles from the Win64 dynamic linker
-"""
-module Win64DyldMoudles
-    using COFF
-    using Gallium
-    using ObjFileBase
-    using Gallium: load, mapped_file, make_fdetab
-    using DWARF.CallFrameInfo
-    using DWARF.CallFrameInfo: EhFrameRef
-    import Base: start, next, done
-
-    function get_peb_addr
-    end
-
-    # See https://msdn.microsoft.com/en-us/library/windows/desktop/aa813706(v=vs.85).aspx
-    immutable LDR_DATA_TABLE_ENTRY
-        Prev::RemotePtr{LDR_DATA_TABLE_ENTRY}
-        Next::RemotePtr{LDR_DATA_TABLE_ENTRY}
-        Reserved::NTuple{4,RemotePtr{Void}}
-        DllBase::RemotePtr{Void}
-        EntryPoint::RemotePtr{Void}
-        Reserved3::RemotePtr{Void}
-        FullDllName::RemotePtr{UInt8}
-    end
-
-    immutable ModuleIterator
-        vm
-        head::RemotePtr{LDR_DATA_TABLE_ENTRY}
-    end
-
-    function mod_for_h(dllbase, h)
-        eh_frame = Gallium.find_ehframes(h)[]
-        fdetab = make_fdetab(dllbase, h)
-        Gallium.Module(h, eh_frame, Nullable{EhFrameRef}, h,
-          fdetab, CallFrameInfo.precompute(eh_frame), Gallium.compute_mod_size(h))
-    end
-
-    function ModuleIterator(vm)
-        addr = get_peb_addr(vm)
-        peb_ldr_data_addr = load(vm, RemotePtr{UInt64}(addr + 24))
-        head = peb_ldr_data_addr + 32
-        ModuleIterator(vm, RemotePtr{LDR_DATA_TABLE_ENTRY}(head))
-    end
-
-    start(m::ModuleIterator) = load(m.vm, RemotePtr{RemotePtr{LDR_DATA_TABLE_ENTRY}}(m.head))
-    function next(m::ModuleIterator, s::RemotePtr{LDR_DATA_TABLE_ENTRY})
-        entry = load(m.vm, s-16)
-        (entry, entry.Next)
-    end
-    done(m::ModuleIterator, s::RemotePtr{LDR_DATA_TABLE_ENTRY}) =
-        s == m.head
-    Base.iteratorsize(::Type{ModuleIterator}) = Base.SizeUnknown()
-
-    function load_library_map(vm)
-        modules = Dict{RemotePtr{Void},Any}()
-        map(ModuleIterator(vm)) do entry
-            fn = mapped_file(vm, entry.DllBase)
-            if !isempty(fn)
-                modules[entry.DllBase] = mod_for_h(entry.DllBase,
-                    readmeta(IOBuffer(open(read, fn))))
-            end
-        end
-    end
-end
-
-"""
 Load the set of active modules from the GlibC dynamic linker
 """
 module GlibcDyldModules
   using ELF
   using Gallium
   using ObjFileBase
-  using Gallium: load, mapped_file
+  using Gallium: load, mapped_file, XPUnwindRef
   using DWARF.CallFrameInfo
   using DWARF.CallFrameInfo: EhFrameRef
 
@@ -342,7 +283,9 @@ module GlibcDyldModules
   function mod_for_h(h)
       eh_frame = Gallium.find_ehframes(h)[]
       eh_frame_hdr = Gallium.find_eh_frame_hdr(h)
-      Gallium.Module(h, eh_frame, EhFrameRef(eh_frame_hdr, eh_frame), h,
+      Gallium.Module(h, Nullable(eh_frame),
+        Nullable{EhFrameRef}(EhFrameRef(eh_frame_hdr, eh_frame)),
+        Nullable{XPUnwindRef}(), h,
         Vector{Tuple{Int,UInt}}(),
         CallFrameInfo.precompute(eh_frame),
         Gallium.compute_mod_size(h))
@@ -387,14 +330,23 @@ module GlibcDyldModules
         # Do not add to the module list if the name is empty. This is true for
         # the main executable as well as the dynamic library loader
         if load(vm, lm.l_name) != 0
-            fn = mapped_file(vm, lm.l_addr)
-            if !isempty(fn)
-                # Don't use the IOStream directly. We do a look of seeking/poking,
-                # so loading the whole thing into memory and using an IOBuffer is
-                # faster
-                buf = IOBuffer(open(read, fn))
-                h = readmeta(buf)
-                modules[lm.l_addr] = mod_for_h(h)
+            # name = load(vm, lm.l_name, 255)
+            # idx = findfirst(name,0)
+            # idx == 0 ? length(name) : idx
+            # @show String(name[1:idx])
+            # @show lm.l_addr
+            # Some libraries (e.g. wine's fake windows libraries) show up with
+            # load address 0, ignore them
+            if lm.l_addr != 0
+                fn = mapped_file(vm, lm.l_addr)
+                if !isempty(fn)
+                    # Don't use the IOStream directly. We do a look of seeking/poking,
+                    # so loading the whole thing into memory and using an IOBuffer is
+                    # faster
+                    buf = IOBuffer(open(read, fn))
+                    h = readmeta(buf)
+                    modules[lm.l_addr] = mod_for_h(h)
+                end
             end
         end
         lm = load(vm, lm.l_next)
@@ -403,4 +355,100 @@ module GlibcDyldModules
     modules
   end
 
+end
+
+"""
+Load the set of active moudles from the Win64 dynamic linker
+"""
+module Win64DyldMoudles
+    using COFF
+    using ELF
+    using Gallium
+    using ObjFileBase
+    using Gallium: load, mapped_file, make_fdetab, XPUnwindRef
+    using DWARF.CallFrameInfo
+    using DWARF.CallFrameInfo: EhFrameRef, CIECache
+    using ..GlibcDyldModules
+    import Base: start, next, done
+
+    function get_peb_addr
+    end
+
+    # See https://msdn.microsoft.com/en-us/library/windows/desktop/aa380518(v=vs.85).aspx
+    immutable UNICODE_STRING
+        Length::UInt16
+        MaximumLength::UInt16
+        Buffer::Ptr{UInt16}
+    end
+
+    # See https://msdn.microsoft.com/en-us/library/windows/desktop/aa813706(v=vs.85).aspx
+    immutable LDR_DATA_TABLE_ENTRY
+        Reserved::NTuple{2,RemotePtr{Void}}
+        Prev::RemotePtr{LDR_DATA_TABLE_ENTRY}
+        Next::RemotePtr{LDR_DATA_TABLE_ENTRY}
+        Reserved2::NTuple{2,RemotePtr{Void}}
+        DllBase::RemotePtr{Void}
+        EntryPoint::RemotePtr{Void}
+        Reserved3::RemotePtr{Void}
+        FullDllName::UNICODE_STRING
+    end
+
+    immutable ModuleIterator
+        vm
+        head::RemotePtr{LDR_DATA_TABLE_ENTRY}
+    end
+
+    function mod_for_h(dllbase, h)
+        sects = Sections(h)
+        pdata = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"pdata"),sects))[]
+        xdata = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"xdata"),sects))[]
+        Gallium.Module(h, Nullable{typeof(pdata)}(), Nullable{EhFrameRef}(),
+            Nullable{XPUnwindRef}(XPUnwindRef(xdata, pdata)), h,
+            Vector{Tuple{Int,UInt}}(),
+            CIECache(), Gallium.compute_mod_size(h))
+    end
+
+    const PEB_LDR_DATA_OFFSET      = 3 * sizeof(UInt64)
+    const InMemoryOrderList_OFFSET = 4 * sizeof(UInt64)
+    function ModuleIterator(vm)
+        addr = get_peb_addr(vm)
+        peb_ldr_data_addr = load(vm, RemotePtr{UInt64}(addr + PEB_LDR_DATA_OFFSET))
+        head = peb_ldr_data_addr + InMemoryOrderList_OFFSET
+        ModuleIterator(vm, RemotePtr{LDR_DATA_TABLE_ENTRY}(head))
+    end
+
+    start(m::ModuleIterator) = load(m.vm, RemotePtr{RemotePtr{LDR_DATA_TABLE_ENTRY}}(m.head))
+    function next(m::ModuleIterator, s::RemotePtr{LDR_DATA_TABLE_ENTRY})
+        @show s
+        entry = load(m.vm, s-16)
+        (entry, entry.Prev)
+    end
+    done(m::ModuleIterator, s::RemotePtr{LDR_DATA_TABLE_ENTRY}) =
+        s == m.head || s == 0
+    Base.iteratorsize(::Type{ModuleIterator}) = Base.SizeUnknown()
+
+    function load_library_map(vm)
+        modules = Dict{RemotePtr{Void},Any}()
+        map(ModuleIterator(vm)) do entry
+            entry.DllBase == 0 && return
+            @show entry.DllBase
+            # If this is a Wine library, the first 0x1000 are dynamically
+            # allocated to create space for the COFF header. Also try to
+            # look 0x1000 bytes after to make sure to get the right file.
+            fn = mapped_file(vm, entry.DllBase)
+            isempty(fn) && (fn = mapped_file(vm, entry.DllBase + 0x1000))
+            if !isempty(fn)
+                h = readmeta(IOBuffer(open(read, fn)))
+                # If this is an ELF library, it is likely one of wine's internal
+                # fake DLLs, follow the Linux codepath instead
+                if isa(h, ELF.ELFHandle)
+                    modules[entry.DllBase-0x20000] =
+                        GlibcDyldModules.mod_for_h(h)
+                else
+                    modules[entry.DllBase] = mod_for_h(entry.DllBase, h)
+                end
+            end
+        end
+        modules
+    end
 end

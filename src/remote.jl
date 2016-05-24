@@ -19,6 +19,10 @@ for f in (:+, :-)
     @eval ($f){T}(ptr::RemotePtr{T},i::Integer) = RemotePtr{T}(($f)(ptr.ptr,i))
     @eval ($f){T}(i::Integer,ptr::RemotePtr{T}) = RemotePtr{T}(($f)(i,ptr.ptr))
 end
+Base.:(==)(x::Integer,y::RemotePtr) = x == y.ptr
+Base.:(==)(x::RemotePtr,y::Integer) = x.ptr == y
+Base.:(==)(x::RemotePtr,y::RemotePtr) = x.ptr == y.ptr
+
 
 # TODO: It's not entirely clear that this distinction is needed or useful,
 # but it's present in RR, so is included in this abstract interface for

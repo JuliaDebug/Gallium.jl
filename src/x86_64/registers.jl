@@ -28,6 +28,12 @@ module X86_64
   )
   const inverse_gdb = map(p->p[2]=>p[1], gdb_numbering)
 
+  const seh_numbering = Dict{Int, Symbol}(
+     0 => :rax, 1 => :rcx, 2 => :rdx, 3 => :rbx, 4 => :rsp, 5 => :rbp,
+     6 => :rsi, 7 => :rdi, (i => Symbol("r$i") for i = 8:15)...
+  )
+  const inverse_seh = map(p->p[2]=>p[1], seh_numbering)
+
   # This operation can be performance critical, precompute it.
   const dwarf2gdbmap = [inverse_gdb[dwarf_numbering[regno]] for regno in basic_regs]
   dwarf2gdb(regno) = dwarf2gdbmap[regno+1]
