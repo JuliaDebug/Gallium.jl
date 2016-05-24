@@ -44,7 +44,7 @@ To install Gallium you may simply run
 Pkg.add("Gallium")
 ```
 
-Gallium currently doesn't work on Windows.
+Gallium currently works on x86_64 on all three major operating systems (Mac/Linux/Windows).
 
 If you wish to run the latest development version, you may also require the development version of Gallium's
 dependencies. The appropriate command to move to these development versions is provided below for convencience.
