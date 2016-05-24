@@ -69,7 +69,7 @@ module X86_64
       end
   end
 
-  function Registers.set_dwarf!(regs::BasicRegs, reg, value)
+  function Registers.set_dwarf!(regs::BasicRegs, reg::Integer, value)
       (reg <= endof(basic_regs)) && setfield!(regs, reg+1, RegisterValue{UInt64}(value))
   end
 

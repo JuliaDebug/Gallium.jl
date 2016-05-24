@@ -52,7 +52,6 @@ region_to_array(region::MemoryRegion) =
         if succ == 0
             error(Libc.GetLastError())
         end
-        @show ret[].Protect
         (ret[].Protect & (PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_READONLY | PAGE_READWRITE)) != 0
     end
 

@@ -84,10 +84,10 @@ function compute_register_states(s, base, mod, r, stacktop, ::Void)
     # Compute CFA
     target_delta::UInt64 = modrel - loc - (stacktop?0:1)
     @assert target_delta < UInt(CallFrameInfo.fde_range(fde, cie))
-    # out = IOContext(STDOUT, :reg_map => Gallium.X86_64.dwarf_numbering)
-    # drs = CallFrameInfo.RegStates()
-    # CallFrameInfo.dump_program(out, cie, target = UInt(target_delta), rs = drs); println(out)
-    # CallFrameInfo.dump_program(out, fde, cie = cie, target = UInt(target_delta), rs = drs)
+    #out = IOContext(STDOUT, :reg_map => Gallium.X86_64.dwarf_numbering)
+    #drs = CallFrameInfo.RegStates()
+    #CallFrameInfo.dump_program(out, cie, target = UInt(target_delta), rs = drs); println(out)
+    #CallFrameInfo.dump_program(out, fde, cie = cie, target = UInt(target_delta), rs = drs)
     CallFrameInfo.evaluate_program(fde, UInt(target_delta), cie = cie, ciecache = ciecache, ccoff=ccoff)::RegStates, cie, target_delta
 end
 
@@ -248,9 +248,10 @@ function unwind_step(s, modules, r, cfi_cache = nothing; stacktop = false, ip_on
         if entry.info.FrameRegOff != 0
             reg = entry.info.FrameRegOff & 0xf
             regoff = (entry.info.FrameRegOff & 0xf0) >> 4
-            frameaddr = get_dwarf(new_registers, X86_64.seh_numbering[reg]) -
+            frameaddr = get_dwarf(r, X86_64.seh_numbering[reg]) -
                 16*regoff
         end
+        set_dwarf!(new_registers, :rsp, get_dwarf(r, :rsp))
         i = 1
         codes = reinterpret(UNWIND_CODE, entry.opcodes)
         while i <= length(entry.opcodes) 
@@ -262,7 +263,7 @@ function unwind_step(s, modules, r, cfi_cache = nothing; stacktop = false, ip_on
                 if run
                     # Pop the register
                     set_dwarf!(new_registers, X86_64.seh_numbering[info],
-                        load(s, RemotePtr{UInt64}(old_rsp)))
+                        get_word(s, RemotePtr{UInt64}(old_rsp)))
                     set_dwarf!(new_registers, :rsp, old_rsp+8)
                 end
                 i += 1
@@ -283,7 +284,7 @@ function unwind_step(s, modules, r, cfi_cache = nothing; stacktop = false, ip_on
         end
         # The return address should now be on the stack. Pop it as well
         old_rsp = get_dwarf(new_registers, :rsp)
-        set_ip!(new_registers, load(s, RemotePtr{UInt64}(old_rsp)))
+        set_ip!(new_registers, get_word(s, RemotePtr{UInt64}(old_rsp)))
         set_dwarf!(new_registers, :rsp, old_rsp+8)
     end
     UInt(ip(new_registers)) == 0 &&  return (false, r)

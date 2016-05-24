@@ -196,6 +196,8 @@ function find_module(modules::LazyLocalModules, ip)
         sstart = ccall(:jl_get_section_start, UInt64, (UInt,), ip-1)
         fdetab = Vector{Tuple{Int,UInt}}()
         ehfr = Nullable{EhFrameRef}()
+        xpdata = Nullable{XPUnwindRef}()
+        ciecache = CIECache()
         if isrelocatable(h)
           isa(h, ELF.ELFHandle) && ELF.relocate!(buf, h)
           fdetab = make_fdetab(sstart, h)
@@ -206,11 +208,17 @@ function find_module(modules::LazyLocalModules, ip)
           end
         elseif isa(h, ELF.ELFHandle)
             ehfr = Nullable{EhFrameRef}(find_ehfr(h))
+        elseif isa(h, COFF.COFFHandle)
+            sects = Sections(h)
+            pdata = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"pdata"),sects))[]
+            xdata = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"xdata"),sects))[]
+            xpdata = Nullable{XPUnwindRef}(XPUnwindRef(xdata, pdata))
         end
         isa(h, MachO.MachOHandle) && isempty(fdetab) && (fdetab = make_fdetab(sstart, h))
         eh_frame = find_ehframes(h)[]
-        modules.modules[sstart] = Module(h, eh_frame,
-            ehfr, h, fdetab, CallFrameInfo.precompute(eh_frame), compute_mod_size(h))
+        !isa(h, COFF.COFFHandle) && (ciecache = CallFrameInfo.precompute(eh_frame))
+        modules.modules[sstart] = Module(h, Nullable(eh_frame),
+            ehfr, xpdata, h, fdetab, ciecache, compute_mod_size(h))
         Pair{UInt,Any}(sstart, modules.modules[sstart])
     end
 end
