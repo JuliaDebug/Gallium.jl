@@ -366,9 +366,9 @@ module GlibcDyldModules
 end
 
 """
-Load the set of active moudles from the Win64 dynamic linker
+Load the set of active modules from the Win64 dynamic linker
 """
-module Win64DyldMoudles
+module Win64DyldModules
     using COFF
     using ELF
     using Gallium
