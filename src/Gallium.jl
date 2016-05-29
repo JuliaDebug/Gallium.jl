@@ -444,8 +444,10 @@ module Gallium
                         end
                     end
                 catch err
-                    @show err
-                    Base.show_backtrace(STDOUT, catch_backtrace())
+                    if !isa(err, ErrorException) || err.msg != "Not found"
+                        @show err
+                        Base.show_backtrace(STDOUT, catch_backtrace())
+                    end
                 end
                 # process SP.variables here
                 #h = readmeta(IOBuffer(data))
@@ -492,6 +494,23 @@ module Gallium
         bp
     end
 
+    """
+        Suspends other tasks that may want to access the terminal.
+        In an out of process debugger, this would be the place
+        where we take control of the tty for the debugger. Since
+        we're not out-of-process, we instead just prevent those
+        tasks from being notified of any reads by modifying internal
+        datastructures.
+    """
+    function suspend_other_tasks()
+        STDINwaitq = STDIN.readnotify.waitq
+        GlobalWaitq = copy(Base.Workqueue)
+        STDIN.readnotify.waitq = Any[]
+        empty!(Base.Workqueue)
+        STDINwaitq, GlobalWaitq
+    end
+    restore_other_tasks(state) = (STDIN.readnotify.waitq = state[1]; append!(Base.Workqueue, state[2]))
+
     function breakpoint_hit(hook, RC)
         if !process_lowlevel_conditionals(Location(LocalSession(), hook.addr), RC)
             return
@@ -520,9 +539,11 @@ module Gallium
             (target_line != linfo.def.line ?
                 :(ASTInterpreter.advance_to_line(interp, $target_line)) :
                 :(nothing)),
+            :(tty_state = Gallium.suspend_other_tasks()),
             :((isempty($conditions) ||
                 any(c->Gallium.matches_condition(interp,c),$conditions)) &&
                 ASTInterpreter.RunDebugREPL(interp)),
+            :(Gallium.restore_other_tasks(tty_state)),
             :(ASTInterpreter.finish!(interp)),
             :(return interp.retval::$(linfo.rettype))))
         f = eval(thunk)
