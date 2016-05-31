@@ -19,6 +19,9 @@ immutable Module{T<:ObjFileBase.ObjectHandle, SR<:ObjFileBase.SectionRef}
     # If the object containing this module's DWARF info is different,
     # this is the handle to it
     dwarfhandle::T
+    # Keeps symbol table indices in ip order as opposed to alphabetically,
+    # to accelerate symbol lookup by ip.
+    inverse_symtab::Vector{UInt32}
     FDETab::Vector{Tuple{Int,UInt}}
     ciecache::CIECache
     sz::UInt
@@ -38,6 +41,26 @@ LazyLocalModules() = LazyLocalModules(Dict{UInt, Any}(), 0)
 
 function first_actual_segment(h)
     deref(first(filter(x->isa(deref(x),MachO.segment_commands)&&(segname(x)!="__PAGEZERO"), LoadCmds(handle(h)))))
+end
+
+function get_syms(mod)
+    local syms
+    sections = Sections(handle(mod))
+    if isa(handle(mod), ELF.ELFHandle)
+        secs = collect(filter(x->sectionname(x) == ".symtab",sections))
+        isempty(secs) && (secs = collect(filter(x->sectionname(x) == ".dynsym",sections)))
+        syms = ELF.Symbols(secs[1])
+    elseif isa(handle(mod), MachO.MachOHandle)
+        syms = MachO.Symbols(handle(mod))
+    elseif isa(handle(mod), COFF.COFFHandle)
+        syms = COFF.Symbols(handle(mod))
+    end
+    syms
+end
+
+function make_inverse_symtab(h)
+    sects = Sections(h)
+    UInt32[symbolnum(x) for x in sort!(collect(get_syms(h)), by = x->symbolvalue(x,sects))]
 end
 
 function compute_mod_size(h)
@@ -165,7 +188,8 @@ find_ehfr(h) = EhFrameRef(find_eh_frame_hdr(h), find_ehframes(h)[1])
                 vmaddr = first_actual_segment(h).vmaddr
                 base += vmaddr
                 modules.modules[base] = Module(h, ehfs[], Nullable{EhFrameRef}(),
-                    obtain_dsym(fname, h), fdetab, CallFrameInfo.precompute(ehfs[]),
+                    obtain_dsym(fname, h), make_inverse_symtab(h),
+                    fdetab, CallFrameInfo.precompute(ehfs[]),
                     compute_mod_size(h))
             end
             modules.nsharedlibs = nactuallibs
@@ -218,7 +242,8 @@ function find_module(modules::LazyLocalModules, ip)
         eh_frame = find_ehframes(h)[]
         !isa(h, COFF.COFFHandle) && (ciecache = CallFrameInfo.precompute(eh_frame))
         modules.modules[sstart] = Module(h, Nullable(eh_frame),
-            ehfr, xpdata, h, fdetab, ciecache, compute_mod_size(h))
+            ehfr, xpdata, h, make_inverse_symtab(h),
+            fdetab, ciecache, compute_mod_size(h))
         Pair{UInt,Any}(sstart, modules.modules[sstart])
     end
 end
@@ -294,6 +319,7 @@ module GlibcDyldModules
       Gallium.Module(h, Nullable(eh_frame),
         Nullable{EhFrameRef}(EhFrameRef(eh_frame_hdr, eh_frame)),
         Nullable{XPUnwindRef}(), h,
+        Gallium.make_inverse_symtab(h),
         Vector{Tuple{Int,UInt}}(),
         CallFrameInfo.precompute(eh_frame),
         Gallium.compute_mod_size(h))
@@ -412,6 +438,7 @@ module Win64DyldModules
         xdata = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"xdata"),sects))[]
         Gallium.Module(h, Nullable{typeof(pdata)}(), Nullable{EhFrameRef}(),
             Nullable{XPUnwindRef}(XPUnwindRef(xdata, pdata)), h,
+            Gallium.make_inverse_symtab(h),
             Vector{Tuple{Int,UInt}}(),
             CIECache(), Gallium.compute_mod_size(h))
     end

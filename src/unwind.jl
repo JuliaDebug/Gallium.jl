@@ -143,6 +143,16 @@ function frame(s, base, mod, r, stacktop :: Bool, cfi_cache)
     Frame(compute_cfa_addr(s, r, rs), rs, cie, UInt64(target_delta))
 end
 
+immutable TransformedArray{A,T,F} <: AbstractArray{T,1}
+    arr::A
+    func::F
+end
+TransformedArray{T,F}(a::AbstractArray{T,1}, func::F) =
+    TransformedArray{typeof(a), T, F}(a, func)
+Base.length(a::TransformedArray) = length(a.arr)
+Base.size(a::TransformedArray) = size(a.arr)
+Base.getindex(a::TransformedArray, idx) = a.func(a.arr[idx])
+
 function symbolicate(modules, ip)
     base, mod = find_module(modules, ip)
     modrel = UInt(modulerel(mod, base, ip))
@@ -157,22 +167,29 @@ function symbolicate(modules, ip)
         eh_frame = first(filter(x->sectionname(x) == ".eh_frame",sections))
         fbase += deref(eh_frame).sh_addr - sectionoffset(eh_frame)
     end=#
-    local syms
-    if isa(handle(mod), ELF.ELFHandle)
-        secs = collect(filter(x->sectionname(x) == ".symtab",sections))
-        isempty(secs) && (secs = collect(filter(x->sectionname(x) == ".dynsym",sections)))
-        syms = ELF.Symbols(secs[1])
-    elseif isa(handle(mod), MachO.MachOHandle)
-        syms = MachO.Symbols(handle(mod))
-    elseif isa(handle(mod), COFF.COFFHandle)
-        syms = COFF.Symbols(handle(mod))
-    end
-    idx = findfirst(syms) do x
-        isundef(x) && return false
-        !isa(handle(mod), COFF.COFFHandle) || COFF.isfunction(x) || return false
+    syms = Gallium.get_syms(mod)
+    function correct_symbol(x)
+        isundef(x) && return (false, UInt64(0))
+        !isa(handle(mod), COFF.COFFHandle) || COFF.isfunction(x) || return (false, UInt64(0))
         value = symbolvalue(x, sections)
         #@show value
-        value == loc
+        (true, value)
+    end
+    if isa(mod, Gallium.Module)
+        idx = searchsortedfirst(TransformedArray(mod.inverse_symtab,
+            idx->symbolvalue(syms[idx], sections)), loc)
+        while idx <= length(syms)
+            ok, value = correct_symbol(syms[mod.inverse_symtab[idx]])
+            (ok && value == loc) && break
+            ok && value > loc && (idx = 0; break)
+            idx += 1
+        end
+        idx != 0 && (idx = mod.inverse_symtab[idx])
+    else
+        idx = findfirst(syms) do sym
+            ok, value = correct_symbol(sym)
+            ok && value == loc
+        end
     end
     idx == 0 && return "???"
     symname(syms[idx]; strtab = StrTab(syms))
