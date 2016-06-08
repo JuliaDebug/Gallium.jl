@@ -50,8 +50,9 @@ module Gallium
         stack
         RCs
         modules
+        session
     end
-    NativeStack(stack::Vector) = NativeStack(stack,Any[],active_modules)
+    NativeStack(stack::Vector) = NativeStack(stack,Any[],active_modules,LocalSession())
 
     ASTInterpreter.done!(stack::NativeStack) = nothing
 
@@ -239,7 +240,7 @@ module Gallium
         ips
     end
 
-    global active_modules = LazyLocalModules()
+    global active_modules = LazyJITModules()
     function rec_backtrace(callback, RC, session = LocalSession(), modules = active_modules, ip_only = false, cfi_cache = nothing; stacktop = true)
         callback(RC) || return
         while true

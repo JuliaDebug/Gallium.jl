@@ -173,6 +173,13 @@ end
 # The text section of jumpto-x86_64-macho.o
 const resume_length = 0x5b
 
+function hook_asm_template(hook_addr, target_addr; call = true)
+    diff = (target_addr - (hook_addr + 5))%Int32
+    @show diff
+    @assert typemin(Int32) <= diff <= typemax(Int32)
+    [ call ? 0xe8 : 0xe9; reinterpret(UInt8, [Int32(diff)]); ]
+end
+
 function hook_asm_template(addr)
     [
         0x90; # 0xcc
@@ -184,6 +191,19 @@ function hook_asm_template(addr)
 end
 hook_asm_template() = (global thehook; hook_asm_template(thehook))
 const hook_length = length(hook_asm_template(UInt(0)))
+
+function hook_tail_template(extra_instructions, ret_addr)
+    addr_bytes = reinterpret(UInt8,[ret_addr])
+    [
+    # Is this a good idea? Probably not
+    extra_instructions...,
+    0x66, 0x68, addr_bytes[7:8]...,
+    0x66, 0x68, addr_bytes[5:6]...,
+    0x66, 0x68, addr_bytes[3:4]...,
+    0x66, 0x68, addr_bytes[1:2]...,
+    0xc3
+    ]
+end
 
 # Split this out to avoid constructing a gc frame in the callback directly
 @noinline function _callback(x::Ptr{Void})
@@ -204,19 +224,12 @@ const hook_length = length(hook_asm_template(UInt(0)))
         ret_addr = hook_addr+length(hook.orig_data)
         extra_instructions = hook.orig_data
     end
-    addr_bytes = reinterpret(UInt8,[ret_addr])
     resume_data = [
         #0xcc,
-        resume_instructions...,
+        resume_instructions;
         # Counteract the pushq %rip in the resume code
-        0x48, 0x83, 0xc4, 0x8, # addq $8, %rsp
-        # Is this a good idea? Probably not
-        extra_instructions...,
-        0x66, 0x68, addr_bytes[7:8]...,
-        0x66, 0x68, addr_bytes[5:6]...,
-        0x66, 0x68, addr_bytes[3:4]...,
-        0x66, 0x68, addr_bytes[1:2]...,
-        0xc3
+        0x48; 0x83; 0xc4; 0x8; # addq $8, %rsp
+        hook_tail_template(extra_instructions, ret_addr)
     ]
     global callback_rwx
     callback_rwx[1:length(resume_data)] = resume_data
@@ -305,10 +318,7 @@ function allow_writing(f, region)
     end
 end
 
-function hook(callback::Function, addr)
-    # Compute number of bytes by disassembly
-    # Ideally we would also check for uses of rip and branches here and error
-    # out if any are found, but for now we don't need to
+function determine_nbytes_to_replace(bytes_required, addr::Ptr{Void})
     triple = "x86_64-apple-darwin15.0.0"
     DC = ccall(:jl_LLVMCreateDisasm, Ptr{Void},
         (Ptr{UInt8},Ptr{Void},Cint,Ptr{Void},Ptr{Void}),
@@ -317,7 +327,7 @@ function hook(callback::Function, addr)
 
     nbytes = 0
     template = hook_asm_template()
-    while nbytes < length(template)
+    while nbytes < bytes_required
         outs = Ref{UInt8}()
         nbytes += ccall(:jl_LLVMDisasmInstruction, Csize_t,
             (Ptr{Void}, Ptr{UInt8}, Csize_t, UInt64, Ptr{UInt8}, Csize_t),
@@ -328,7 +338,20 @@ function hook(callback::Function, addr)
             outs, 1      # OutString
             )
     end
+    
+    nbytes
+end
+function determine_nbytes_to_replace(bytes_required, orig_bytes)
+    determine_nbytes_to_replace(bytes_required, Ptr{Void}(pointer(orig_bytes)))
+end
 
+function hook(callback::Function, addr)
+    # Compute number of bytes by disassembly
+    # Ideally we would also check for uses of rip and branches here and error
+    # out if any are found, but for now we don't need to
+
+    template = hook_asm_template()
+    nbytes = determine_nbytes_to_replace(length(template), addr)
     # Record the instructions that were there originally
     dest = pointer_to_array(convert(Ptr{UInt8}, addr), (nbytes,), false)
     orig_data = copy(dest)

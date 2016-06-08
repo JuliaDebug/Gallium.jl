@@ -33,11 +33,12 @@ Module(handle, eh_frame, eh_frame_hdr, dwarfhandle, FDETab, ciecache, sz) =
 ObjFileBase.handle(mod::Module) = mod.handle
 dhandle(mod::Module) = mod.dwarfhandle
 dhandle(h) = h
-type LazyLocalModules
+type LazyJITModules
+    session
     modules::Dict{UInt, Module}
     nsharedlibs::Int
 end
-LazyLocalModules() = LazyLocalModules(Dict{UInt, Any}(), 0)
+LazyJITModules() = LazyJITModules(LocalSession(), Dict{UInt, Any}(), 0)
 
 function first_actual_segment(h)
     deref(first(filter(x->isa(deref(x),MachO.segment_commands)&&(segname(x)!="__PAGEZERO"), LoadCmds(handle(h)))))
@@ -45,15 +46,16 @@ end
 
 function get_syms(mod)
     local syms
-    sections = Sections(handle(mod))
-    if isa(handle(mod), ELF.ELFHandle)
+    h = dhandle(mod)
+    sections = Sections(h)
+    if isa(h, ELF.ELFHandle)
         secs = collect(filter(x->sectionname(x) == ".symtab",sections))
         isempty(secs) && (secs = collect(filter(x->sectionname(x) == ".dynsym",sections)))
         syms = ELF.Symbols(secs[1])
-    elseif isa(handle(mod), MachO.MachOHandle)
-        syms = MachO.Symbols(handle(mod))
-    elseif isa(handle(mod), COFF.COFFHandle)
-        syms = COFF.Symbols(handle(mod))
+    elseif isa(h, MachO.MachOHandle)
+        syms = MachO.Symbols(h)
+    elseif isa(h, COFF.COFFHandle)
+        syms = COFF.Symbols(h)
     end
     syms
 end
@@ -207,46 +209,59 @@ elseif is_linux()
     end
 end
 
-function find_module(modules::LazyLocalModules, ip)
+function jit_mod_for_h(buf, h, sstart)
+    fdetab = Vector{Tuple{Int,UInt}}()
+    ehfr = Nullable{EhFrameRef}()
+    xpdata = Nullable{XPUnwindRef}()
+    ciecache = CIECache()
+    if isrelocatable(h)
+      isa(h, ELF.ELFHandle) && ELF.relocate!(buf, h)
+      fdetab = make_fdetab(sstart, h)
+      if isa(h, MachO.MachOHandle)
+        LOI = Dict(:__text => sstart,
+            :__debug_str=>0) #This one really shouldn't be necessary
+        MachO.relocate!(buf, h; LOI=LOI)
+      end
+    elseif isa(h, ELF.ELFHandle)
+        ehfr = Nullable{EhFrameRef}(find_ehfr(h))
+    elseif isa(h, COFF.COFFHandle)
+        sects = Sections(h)
+        pdata = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"pdata"),sects))[]
+        xdata = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"xdata"),sects))[]
+        xpdata = Nullable{XPUnwindRef}(XPUnwindRef(xdata, pdata))
+    end
+    isa(h, MachO.MachOHandle) && isempty(fdetab) && (fdetab = make_fdetab(sstart, h))
+    eh_frame = find_ehframes(h)[]
+    !isa(h, COFF.COFFHandle) && (ciecache = CallFrameInfo.precompute(eh_frame))
+    Module(h, Nullable(eh_frame),
+        ehfr, xpdata, h, make_inverse_symtab(h),
+        fdetab, ciecache, compute_mod_size(h))
+end
+
+function retrieve_obj_data(s::LocalSession, ip)
+    data = ccall(:jl_get_dobj_data, Any, (UInt,), ip)
+    @assert data != nothing
+    copy(data)
+end
+retrieve_section_start(s::LocalSession, ip) =
+    ccall(:jl_get_section_start, UInt64, (UInt,), ip)
+
+function find_module(modules::LazyJITModules, ip)
     ret = _find_module(modules.modules, ip)
     return !isnull(ret) ? get(ret) : begin
         if update_shlibs!(modules)
             return find_module(modules, ip)
         end
-        data = ccall(:jl_get_dobj_data, Any, (UInt,), ip)
-        @assert data != nothing
-        buf = IOBuffer(copy(data), true, true)
+        buf = IOBuffer(retrieve_obj_data(modules.session, ip), true, true)
         h = readmeta(buf)
-        sstart = ccall(:jl_get_section_start, UInt64, (UInt,), ip-1)
-        fdetab = Vector{Tuple{Int,UInt}}()
-        ehfr = Nullable{EhFrameRef}()
-        xpdata = Nullable{XPUnwindRef}()
-        ciecache = CIECache()
-        if isrelocatable(h)
-          isa(h, ELF.ELFHandle) && ELF.relocate!(buf, h)
-          fdetab = make_fdetab(sstart, h)
-          if isa(h, MachO.MachOHandle)
-            LOI = Dict(:__text => sstart,
-                :__debug_str=>0) #This one really shouldn't be necessary
-            MachO.relocate!(buf, h; LOI=LOI)
-          end
-        elseif isa(h, ELF.ELFHandle)
-            ehfr = Nullable{EhFrameRef}(find_ehfr(h))
-        elseif isa(h, COFF.COFFHandle)
-            sects = Sections(h)
-            pdata = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"pdata"),sects))[]
-            xdata = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"xdata"),sects))[]
-            xpdata = Nullable{XPUnwindRef}(XPUnwindRef(xdata, pdata))
-        end
-        isa(h, MachO.MachOHandle) && isempty(fdetab) && (fdetab = make_fdetab(sstart, h))
-        eh_frame = find_ehframes(h)[]
-        !isa(h, COFF.COFFHandle) && (ciecache = CallFrameInfo.precompute(eh_frame))
-        modules.modules[sstart] = Module(h, Nullable(eh_frame),
-            ehfr, xpdata, h, make_inverse_symtab(h),
-            fdetab, ciecache, compute_mod_size(h))
+        sstart = retrieve_section_start(modules.session, ip-1)
+        modules.modules[sstart] = jit_mod_for_h(buf, h, sstart)
         Pair{UInt,Any}(sstart, modules.modules[sstart])
     end
 end
+
+module_dict(modules) = modules
+module_dict(modules::LazyJITModules) = modules.modules
 
 function lookup_sym(modules, name)
     ret = lookup_syms(modules, name)
@@ -257,7 +272,7 @@ end
 function lookup_syms(modules, name, n = typemax(UInt))
     ret = Any[]
     name = string(name)
-    for (base, h) in modules
+    for (base, h) in module_dict(modules)
       symtab = ELF.Symbols(handle(h))
       strtab = StrTab(symtab)
       idx = findfirst(x->ELF.symname(x, strtab = strtab)==name,symtab)
@@ -283,6 +298,7 @@ module GlibcDyldModules
   using Gallium: load, mapped_file, XPUnwindRef
   using DWARF.CallFrameInfo
   using DWARF.CallFrameInfo: EhFrameRef
+  using ObjFileBase: mangle_sname, handle
 
   immutable link_map
     l_addr::RemotePtr{Void}
@@ -313,13 +329,53 @@ module GlibcDyldModules
     entry_ptr = auxv[2entry_idx]
   end
 
-  function mod_for_h(h)
+  using CRC
+  const crc32 = crc(CRC_32)
+
+  """
+    Try to obtain a handle to this object's debug object (a second object that
+    contains the separated-out debug information). This is done by searching
+    following any .gnu_debuglink section that this object may contain.
+    
+    References:
+    https://access.redhat.com/documentation/en-US/Red_Hat_Enterprise_Linux/4/html/Debugging_with_gdb/separate-debug-files.html
+    https://blogs.oracle.com/dbx/entry/gnu_debuglink_or_debugging_system
+  """
+  function search_debug_object(h, filename)
+      sects = Sections(h)
+      debuglinks = collect(filter(x->sectionname(x)==mangle_sname(handle(sects),"gnu_debuglink"),sects))
+      isempty(debuglinks) && return h
+      debuglink = debuglinks[]
+      # Read the null terminated name of the debug library
+      seek(debuglink, 0)
+      fname = readuntil(handle(debuglink), '\0')[1:end-1]
+      # Align to 4 byte boundary
+      skip(handle(debuglink), ((4-position(debuglink)%4)%4))
+      # Read checksum
+      crc = read(debuglink, UInt32)
+      # Now search for this file in the same locations as GDB
+      execdir = dirname(filename)
+      const globaldir = "/usr/lib/debug"
+      for path in [execdir, joinpath(execdir,".debug"),
+                   # For /usr/lib/..., /usr/lib/debug/usr/lib/...
+                   joinpath(globaldir, execdir[2:end])]
+         fp = joinpath(path, fname) 
+         isfile(fp) || continue
+         buf = open(read, fp)
+         crc == crc32(buf) || continue
+         return readmeta(IOBuffer(buf))
+      end
+      return h
+  end
+
+  function mod_for_h(h, filename)
       eh_frame = Gallium.find_ehframes(h)[]
       eh_frame_hdr = Gallium.find_eh_frame_hdr(h)
+      dh = search_debug_object(h, filename)
       Gallium.Module(h, Nullable(eh_frame),
         Nullable{EhFrameRef}(EhFrameRef(eh_frame_hdr, eh_frame)),
-        Nullable{XPUnwindRef}(), h,
-        Gallium.make_inverse_symtab(h),
+        Nullable{XPUnwindRef}(), dh,
+        Gallium.make_inverse_symtab(dh),
         Vector{Tuple{Int,UInt}}(),
         CallFrameInfo.precompute(eh_frame),
         Gallium.compute_mod_size(h))
@@ -355,7 +411,7 @@ module GlibcDyldModules
     phs = ELF.ProgramHeaders(imageh)
     idx = findfirst(p->p.p_offset==0&&p.p_type==ELF.PT_LOAD, phs)
     imagebase = phs[idx].p_vaddr + image_slide
-    modules[RemotePtr{Void}(imagebase)] = mod_for_h(imageh)
+    modules[RemotePtr{Void}(imagebase)] = mod_for_h(imageh, "")
 
     # Now for the shared libraries. We traverse the linked list of modules
     # in the dynamic linker's r_debug structure.
@@ -379,7 +435,7 @@ module GlibcDyldModules
                     # faster
                     buf = IOBuffer(open(read, fn))
                     h = readmeta(buf)
-                    modules[lm.l_addr] = mod_for_h(h)
+                    modules[lm.l_addr] = mod_for_h(h, fn)
                 end
             end
         end
@@ -478,7 +534,7 @@ module Win64DyldModules
                 # fake DLLs, follow the Linux codepath instead
                 if isa(h, ELF.ELFHandle)
                     modules[entry.DllBase-0x20000] =
-                        GlibcDyldModules.mod_for_h(h)
+                        GlibcDyldModules.mod_for_h(h, fn)
                 else
                     modules[entry.DllBase] = mod_for_h(entry.DllBase, h)
                 end

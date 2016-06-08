@@ -162,7 +162,7 @@ function symbolicate(modules, ip)
         loc = find_seh_entry(mod, modrel).start
     end
         #loc = initial_loc(fde, cie)
-    sections = Sections(handle(mod))
+    sections = Sections(Gallium.dhandle(mod))
     #=if handle(mod).file.header.e_type == ELF.ET_REL
         eh_frame = first(filter(x->sectionname(x) == ".eh_frame",sections))
         fbase += deref(eh_frame).sh_addr - sectionoffset(eh_frame)
