@@ -189,7 +189,9 @@ find_ehfr(h) = EhFrameRef(find_eh_frame_hdr(h), find_ehframes(h)[1])
                 fdetab = make_fdetab(base, h)
                 vmaddr = first_actual_segment(h).vmaddr
                 base += vmaddr
-                modules.modules[base] = Module(h, ehfs[], Nullable{EhFrameRef}(),
+                modules.modules[base] = Module(h, Nullable(ehfs[]),
+                    Nullable{EhFrameRef}(),
+                    Nullable{XPUnwindRef}(),
                     obtain_dsym(fname, h), make_inverse_symtab(h),
                     fdetab, CallFrameInfo.precompute(ehfs[]),
                     compute_mod_size(h))
