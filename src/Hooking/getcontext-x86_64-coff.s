@@ -62,3 +62,5 @@ movq    %r15, UC_MCONTEXT_GREGS_R15(%rdi)
 movq    (%rsp),%rsi
 movq    %rsi, UC_MCONTEXT_GREGS_RIP(%rdi) # store return address as rip
 retq
+
+.section	.note.GNU-stack,"",@progbits

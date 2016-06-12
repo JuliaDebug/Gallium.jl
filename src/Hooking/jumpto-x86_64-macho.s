@@ -35,3 +35,5 @@ movq     UC_MCONTEXT_GREGS_R15(%rdi), %r15
 movq    UC_MCONTEXT_GREGS_RSP(%rdi), %rsp  # cut back rsp to new location
 pop     %rdi            # rdi was saved here earlier
 ret                     # rip was saved here
+
+.section	.note.GNU-stack,"",@progbits

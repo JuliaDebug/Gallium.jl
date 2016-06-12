@@ -153,8 +153,16 @@ Base.length(a::TransformedArray) = length(a.arr)
 Base.size(a::TransformedArray) = size(a.arr)
 Base.getindex(a::TransformedArray, idx) = a.func(a.arr[idx])
 
-function symbolicate(modules, ip)
-    base, mod = find_module(modules, ip)
+symbolicate(modules, ip) = symbolicate(LocalSession(), modules, ip)
+function symbolicate(session, modules, ip)
+    base, mod = try
+        find_module(session, modules, ip)
+    catch err
+        if !isa(err, ErrorException) || !contains(err.msg, "not found")
+            rethrow(err)
+        end
+        return "<Unknown Module>"
+    end
     modrel = UInt(modulerel(mod, base, ip))
     if isnull(mod.xpdata)
         loc, fde = find_fde(mod, modrel)
@@ -171,6 +179,8 @@ function symbolicate(modules, ip)
     function correct_symbol(x)
         isundef(x) && return (false, UInt64(0))
         !isa(handle(mod), COFF.COFFHandle) || COFF.isfunction(x) || return (false, UInt64(0))
+        isa(handle(mod), ELF.ELFHandle) &&
+            (ELF.st_type(x) != ELF.STT_FUNC) && return (false, UInt64(0))
         value = symbolvalue(x, sections)
         #@show value
         (true, value)
@@ -180,8 +190,9 @@ function symbolicate(modules, ip)
             idx->symbolvalue(syms[idx], sections)), loc)
         while idx <= length(syms)
             ok, value = correct_symbol(syms[mod.inverse_symtab[idx]])
+            (mod.is_jit_dobj) && (value -= base)
             (ok && value == loc) && break
-            ok && value > loc && (idx = 0; break)
+            ok && value > loc && (#=idx = 0;=# break)
             idx += 1
         end
         idx != 0 && (idx = mod.inverse_symtab[idx])
@@ -233,7 +244,7 @@ function unwind_step(s, modules, r, cfi_cache = nothing; stacktop = false, ip_on
     invalidate_regs!(new_registers)
     
     # First, find the module we're currently in
-    base, mod = find_module(modules, UInt(ip(r)))
+    base, mod = find_module(s, modules, UInt(ip(r)))
     modrel = UInt64(ip(r)) - base
     
     # Determine if we have windows or DWARF unwind info

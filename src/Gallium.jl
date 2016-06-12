@@ -104,8 +104,7 @@ module Gallium
     using DWARF: CallFrameInfo
     function ASTInterpreter.execute_command(state, x::GalliumFrame, ::Val{:cfi}, command)
         modules = state.top_interp.modules
-        ip = isa(x, NativeStack) ? x.stack[end].ip : x.ip
-        base, mod = find_module(modules, ip)
+        mod, base, ip = modbaseip_for_stack(state, x)
         modrel = UInt(ip - base)
         loc, fde = Unwinder.find_fde(mod, modrel)
         cie = realize_cie(fde)
@@ -117,19 +116,20 @@ module Gallium
         return false
     end
     
-    function find_module(modules, frame::CStackFrame)
+    function find_module(session, modules, frame::CStackFrame)
         ip = frame.ip - (frame.stacktop ? 0 : 1)
-        base, mod = find_module(modules, ip)
+        base, mod = find_module(session, modules, ip)
     end
 
     function modbaseip_for_stack(state, stack)
         modules = state.top_interp.modules
         frame = isa(stack, NativeStack) ? stack.stack[end] : stack
+        session = isa(state.top_interp, NativeStack) ? state.top_interp.session : LocalSession()
         ip = frame.ip - (frame.stacktop ? 0 : 1)
-        base, mod = find_module(modules, ip)
+        base, mod = find_module(session, modules, ip)
         mod, base, ip
     end
-
+    
     function ASTInterpreter.execute_command(state, stack::GalliumFrame, ::Val{:handle}, command)
         Base.LineEdit.transition(state.s, :abort)
         mod, _, __ = modbaseip_for_stack(state, stack)
@@ -244,11 +244,11 @@ module Gallium
     function rec_backtrace(callback, RC, session = LocalSession(), modules = active_modules, ip_only = false, cfi_cache = nothing; stacktop = true)
         callback(RC) || return
         while true
-            (ok, RC) = try
+            (ok, RC) =# try
                 Unwinder.unwind_step(session, modules, RC, cfi_cache; stacktop = stacktop, ip_only = ip_only)
-            catch e # e.g. invalid memory access, invalid unwind info etc.
-                break
-            end
+            #catch e # e.g. invalid memory access, invalid unwind info etc.
+            #    break
+            #end
             stacktop = false
             ok || break
             callback(RC) || break
@@ -301,7 +301,7 @@ module Gallium
             local declfile="", declline=0
             if fromC
                 sstart, h = try
-                    find_module(modules, theip)
+                    find_module(session, modules, theip)
                 catch # Unwind got it wrong, but still include at least one stack frame
                     push!(stack, CStackFrame(theip, file, line, declfile, declline, firstframe))
                     return false
@@ -337,7 +337,7 @@ module Gallium
                 end
                 push!(stack, CStackFrame(theip, file, line, declfile, declline, firstframe))
             else
-                sstart, h = find_module(modules, theip)
+                sstart, h = find_module(session, modules, theip)
                 isnull(ipinfo.linfo) && return false
                 tlinfo = get(ipinfo.linfo)
                 env = ASTInterpreter.prepare_locals(tlinfo)

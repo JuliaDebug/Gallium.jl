@@ -25,20 +25,27 @@ immutable Module{T<:ObjFileBase.ObjectHandle, SR<:ObjFileBase.SectionRef}
     FDETab::Vector{Tuple{Int,UInt}}
     ciecache::CIECache
     sz::UInt
+    is_jit_dobj::Bool
 end
 Module(handle, eh_frame, eh_frame_hdr, dwarfhandle, FDETab, ciecache, sz) =
     Module{typeof(handle),typeof(eh_frame)}(handle, eh_frame, eh_frame_hdr,
-        Nullable{XPUnwindRef}(), dwarfhandle, FDETab, ciecache, sz)
+        Nullable{XPUnwindRef}(), dwarfhandle, FDETab, ciecache, sz, false)
+
+type MultiASModules{T}
+    new_as_callback
+    modules_by_as::Dict{T, Any}  # ASID => modules
+end
+function current_asid
+end
 
 ObjFileBase.handle(mod::Module) = mod.handle
 dhandle(mod::Module) = mod.dwarfhandle
 dhandle(h) = h
 type LazyJITModules
-    session
     modules::Dict{UInt, Module}
     nsharedlibs::Int
 end
-LazyJITModules() = LazyJITModules(LocalSession(), Dict{UInt, Any}(), 0)
+LazyJITModules() = LazyJITModules(Dict{UInt, Any}(), 0)
 
 function first_actual_segment(h)
     deref(first(filter(x->isa(deref(x),MachO.segment_commands)&&(segname(x)!="__PAGEZERO"), LoadCmds(handle(h)))))
@@ -92,9 +99,9 @@ compute_mod_size(m::Module) = UInt(m.sz)
     Nullable{Pair{UInt,Any}}()
 end
 
-function find_module(modules, ip)
+function find_module(session, modules, ip)
     ret = _find_module(modules, ip)
-    isnull(ret) && error("ip 0x$(hex(UInt(ip),2sizeof(UInt))) found")
+    isnull(ret) && error("ip 0x$(hex(UInt(ip),2sizeof(UInt))) not found")
     get(ret)
 end
 
@@ -112,7 +119,8 @@ function make_fdetab(base, mod, is_eh_not_debug=true)
             # For relocated ELF Objects and unlrelocated shared libraries,
             # it is an offset from the load address of the FDE (in the shared library case,
             # sh_addr == sectionoffset).
-            ip = (Int(deref(eh_frame).sh_addr) - Int(sectionoffset(eh_frame)) + Int(initial_loc(fde))) - Int(base)
+            ip = (Int(deref(eh_frame).sh_addr) - Int(sectionoffset(eh_frame)) +
+                Int(initial_loc(fde))) - Int(UInt(base))
         elseif isrelocatable(mod)
             # MachO eh_frame section doesn't get relocated, so it's still relative to
             # the file's local address space.
@@ -194,7 +202,7 @@ find_ehfr(h) = EhFrameRef(find_eh_frame_hdr(h), find_ehframes(h)[1])
                     Nullable{XPUnwindRef}(),
                     obtain_dsym(fname, h), make_inverse_symtab(h),
                     fdetab, CallFrameInfo.precompute(ehfs[]),
-                    compute_mod_size(h))
+                    compute_mod_size(h), false)
             end
             modules.nsharedlibs = nactuallibs
             return true
@@ -237,7 +245,7 @@ function jit_mod_for_h(buf, h, sstart)
     !isa(h, COFF.COFFHandle) && (ciecache = CallFrameInfo.precompute(eh_frame))
     Module(h, Nullable(eh_frame),
         ehfr, xpdata, h, make_inverse_symtab(h),
-        fdetab, ciecache, compute_mod_size(h))
+        fdetab, ciecache, compute_mod_size(h), true)
 end
 
 function retrieve_obj_data(s::LocalSession, ip)
@@ -248,33 +256,46 @@ end
 retrieve_section_start(s::LocalSession, ip) =
     ccall(:jl_get_section_start, UInt64, (UInt,), ip)
 
-function find_module(modules::LazyJITModules, ip)
+function find_module(session, modules::LazyJITModules, ip)
     ret = _find_module(modules.modules, ip)
     return !isnull(ret) ? get(ret) : begin
         if update_shlibs!(modules)
-            return find_module(modules, ip)
+            return find_module(session, modules, ip)
         end
-        buf = IOBuffer(retrieve_obj_data(modules.session, ip), true, true)
+        sstart = UInt(retrieve_section_start(session, ip-1))
+        sstart == 0 && error("ip 0x$(hex(UInt(ip),2sizeof(UInt))) not found")
+        buf = IOBuffer(retrieve_obj_data(session, ip), true, true)
         h = readmeta(buf)
-        sstart = retrieve_section_start(modules.session, ip-1)
         modules.modules[sstart] = jit_mod_for_h(buf, h, sstart)
         Pair{UInt,Any}(sstart, modules.modules[sstart])
     end
 end
+find_module(modules, ip) = find_module(LocalSession(), modules, ip)
 
-module_dict(modules) = modules
-module_dict(modules::LazyJITModules) = modules.modules
+function find_module(session, modules::MultiASModules, ip)
+    asid = current_asid(session)
+    if !haskey(modules.modules_by_as, asid)
+        modules.modules_by_as[asid] = modules.new_as_callback(session)
+    end
+    find_module(session, modules.modules_by_as[asid], ip)
+end
 
-function lookup_sym(modules, name)
-    ret = lookup_syms(modules, name)
+module_dict(modules) = module_dict(LocalSession(), modules)
+module_dict(session, modules) = modules
+module_dict(session, modules::LazyJITModules) = modules.modules
+module_dict(session, modules::MultiASModules) =
+    module_dict(session, modules.modules_by_as[current_asid(session)])
+
+function lookup_sym(session, modules, name)
+    ret = lookup_syms(session, modules, name)
     length(ret) == 0 && error("Not found")
     ret[]
 end
 
-function lookup_syms(modules, name, n = typemax(UInt))
+function lookup_syms(session, modules, name, n = typemax(UInt))
     ret = Any[]
     name = string(name)
-    for (base, h) in module_dict(modules)
+    for (base, h) in module_dict(session, modules)
       symtab = ELF.Symbols(handle(h))
       strtab = StrTab(symtab)
       idx = findfirst(x->ELF.symname(x, strtab = strtab)==name,symtab)
@@ -380,7 +401,7 @@ module GlibcDyldModules
         Gallium.make_inverse_symtab(dh),
         Vector{Tuple{Int,UInt}}(),
         CallFrameInfo.precompute(eh_frame),
-        Gallium.compute_mod_size(h))
+        Gallium.compute_mod_size(h), false)
   end
 
   """
@@ -393,8 +414,19 @@ module GlibcDyldModules
     it's intended load address.
   """
   function load_library_map(vm, imageh, image_slide = 0)
-    # Step 1: Obtain the target address space's r_debug struct
-    dynamic_sec = first(filter(x->sectionname(x)==".dynamic",ELF.Sections(imageh)))
+    # Construct the actual module map
+    modules = Dict{RemotePtr{Void},Any}()
+
+    # First the main executable. To do so we need to find the image base.
+    phs = ELF.ProgramHeaders(imageh)
+    idx = findfirst(p->p.p_offset==0&&p.p_type==ELF.PT_LOAD, phs)
+    imagebase = phs[idx].p_vaddr + image_slide
+    modules[RemotePtr{Void}(imagebase)] = mod_for_h(imageh, "")
+
+    # Obtain the target address space's r_debug struct
+    secs = collect(filter(x->sectionname(x)==".dynamic",ELF.Sections(imageh)))
+    isempty(secs) && (return modules)
+    dynamic_sec = secs[]
     dynamic = reinterpret(UInt64,read(dynamic_sec))
     dt_debug_idx = findfirst(i->dynamic[i]==ELF.DT_DEBUG, 1:2:length(dynamic))
 
@@ -405,15 +437,6 @@ module GlibcDyldModules
 
     debug_struct = load(vm, dt_debug_addr)
     last_link_map = load(vm, debug_struct.link_map)
-
-    # Step 2: Construct the actual module map
-    modules = Dict{RemotePtr{Void},Any}()
-
-    # First the main executable. To do so we need to find the image base.
-    phs = ELF.ProgramHeaders(imageh)
-    idx = findfirst(p->p.p_offset==0&&p.p_type==ELF.PT_LOAD, phs)
-    imagebase = phs[idx].p_vaddr + image_slide
-    modules[RemotePtr{Void}(imagebase)] = mod_for_h(imageh, "")
 
     # Now for the shared libraries. We traverse the linked list of modules
     # in the dynamic linker's r_debug structure.
@@ -498,7 +521,7 @@ module Win64DyldModules
             Nullable{XPUnwindRef}(XPUnwindRef(xdata, pdata)), h,
             Gallium.make_inverse_symtab(h),
             Vector{Tuple{Int,UInt}}(),
-            CIECache(), Gallium.compute_mod_size(h))
+            CIECache(), Gallium.compute_mod_size(h), false)
     end
 
     const PEB_LDR_DATA_OFFSET      = 3 * sizeof(UInt64)

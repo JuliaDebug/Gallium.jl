@@ -63,3 +63,4 @@ movq    %rsi, UC_MCONTEXT_GREGS_RIP(%rdi) # store return address as rip
 retq
 
 .subsections_via_symbols
+.section	.note.GNU-stack,"",@progbits
