@@ -338,7 +338,7 @@ module GlibcDyldModules
     Try to obtain a handle to this object's debug object (a second object that
     contains the separated-out debug information). This is done by searching
     following any .gnu_debuglink section that this object may contain.
-    
+
     References:
     https://access.redhat.com/documentation/en-US/Red_Hat_Enterprise_Linux/4/html/Debugging_with_gdb/separate-debug-files.html
     https://blogs.oracle.com/dbx/entry/gnu_debuglink_or_debugging_system
@@ -361,7 +361,7 @@ module GlibcDyldModules
       for path in [execdir, joinpath(execdir,".debug"),
                    # For /usr/lib/..., /usr/lib/debug/usr/lib/...
                    joinpath(globaldir, execdir[2:end])]
-         fp = joinpath(path, fname) 
+         fp = joinpath(path, fname)
          isfile(fp) || continue
          buf = open(read, fp)
          crc == crc32(buf) || continue
