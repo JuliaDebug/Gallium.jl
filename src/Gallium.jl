@@ -650,10 +650,10 @@ module Gallium
     end
 
     function _breakpoint_method(meth::Method, bp::Breakpoint, predicate = linfo->true)
-        isdefined(meth, :specializations) || return
-        for spec in meth.specializations
-            predicate(spec) || continue
-            _breakpoint_spec(spec, bp)
+        spec = meth.specializations
+        while spec ≠ nothing
+            predicate(spec.func) && _breakpoint_spec(spec.func, bp)
+            spec = spec.next
         end
     end
 
