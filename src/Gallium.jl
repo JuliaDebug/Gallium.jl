@@ -116,7 +116,7 @@ module Gallium
         CallFrameInfo.dump_program(out, fde, cie = cie, target = UInt(target_delta), rs = drs)
         return false
     end
-    
+
     function find_module(modules, frame::CStackFrame)
         ip = frame.ip - (frame.stacktop ? 0 : 1)
         base, mod = find_module(modules, ip)
@@ -136,7 +136,7 @@ module Gallium
         eval(Main,:(h = $(handle(mod))))
         return false
     end
-    
+
     function compute_ip(handle, base, theip)
         if isa(handle, ELF.ELFHandle) && ObjFileBase.isexecutable(handle)
             phs = ELF.ProgramHeaders(handle)
@@ -157,7 +157,7 @@ module Gallium
         AbstractTrees.print_tree(show, IOContext(STDOUT,:strtab=>StrTab(dbgs.debug_str)), unit)
         return false
     end
-    
+
     function ASTInterpreter.execute_command(state, stack::GalliumFrame,
             cmd::Union{Val{:cu},Val{:seh}}, command)
         mod, base, ip = modbaseip_for_stack(state, stack)
@@ -275,11 +275,11 @@ module Gallium
         Hooking.mem_validate(typetypeptr,sizeof(Ptr)) || return false
         UInt(unsafe_load(typetypeptr))&(~UInt(0x3)) == UInt(pointer_from_objref(DataType))
     end
-    
+
     function get_ipinfo(session::LocalSession, theip)
         Base.StackTraces.lookup(theip)
     end
-    
+
     function get_ipinfo(session, theip)
         sf = StackFrame(:unknown, "", 0, Nullable{LambdaInfo}(),
             true, false, theip)
@@ -328,7 +328,7 @@ module Gallium
                         line = entry.line
                         fileentry = linetab.header.file_names[entry.file]
                         file = fileentry.name
-                        
+
                         declfile = DWARF.extract_attribute(sp, DWARF.DW_AT_decl_file)
                         declfile = isnull(declfile) ? "" : linetab.header.file_names[convert(UInt,get(declfile))].name
                         declline = DWARF.extract_attribute(sp, DWARF.DW_AT_decl_line)
@@ -650,10 +650,10 @@ module Gallium
     end
 
     function _breakpoint_method(meth::Method, bp::Breakpoint, predicate = linfo->true)
-        isdefined(meth, :specializations) || return
-        for spec in meth.specializations
-            predicate(spec) || continue
-            _breakpoint_spec(spec, bp)
+        spec = meth.specializations
+        while spec ≠ nothing
+            predicate(spec.func) && _breakpoint_spec(spec.func, bp)
+            spec = spec.next
         end
     end
 

@@ -167,7 +167,7 @@ find_ehfr(h) = EhFrameRef(find_eh_frame_hdr(h), find_ehframes(h)[1])
             for idx in (modules.nsharedlibs+1):nactuallibs
                 idx -= 1
                 base = ccall(:_dyld_get_image_vmaddr_slide, UInt, (UInt32,), idx)
-                fname = bytestring(
+                fname = unsafe_string(
                     ccall(:_dyld_get_image_name, Ptr{UInt8}, (UInt32,), idx))
                 # hooking is weird
                 contains(fname, "hooking.dylib") &&
@@ -338,7 +338,7 @@ module GlibcDyldModules
     Try to obtain a handle to this object's debug object (a second object that
     contains the separated-out debug information). This is done by searching
     following any .gnu_debuglink section that this object may contain.
-    
+
     References:
     https://access.redhat.com/documentation/en-US/Red_Hat_Enterprise_Linux/4/html/Debugging_with_gdb/separate-debug-files.html
     https://blogs.oracle.com/dbx/entry/gnu_debuglink_or_debugging_system
@@ -361,7 +361,7 @@ module GlibcDyldModules
       for path in [execdir, joinpath(execdir,".debug"),
                    # For /usr/lib/..., /usr/lib/debug/usr/lib/...
                    joinpath(globaldir, execdir[2:end])]
-         fp = joinpath(path, fname) 
+         fp = joinpath(path, fname)
          isfile(fp) || continue
          buf = open(read, fp)
          crc == crc32(buf) || continue
