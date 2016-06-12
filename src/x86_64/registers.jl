@@ -24,7 +24,7 @@ module X86_64
 
   const gdb_numbering = Dict{Int, Symbol}(
      0 => :rax, 1 => :rbx, 2 => :rcx, 3 => :rdx,
-     4 => :rsi, [i=>dwarf_numbering[i] for i in 5:16]...
+     4 => :rsi, Dict(i=>dwarf_numbering[i] for i in 5:16)...
   )
   const inverse_gdb = map(p->p[2]=>p[1], gdb_numbering)
 
