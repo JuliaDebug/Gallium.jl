@@ -697,9 +697,10 @@ module Gallium
     end
 
     function _breakpoint_method(meth::Method, bp::Breakpoint, predicate = linfo->true)
-        isdefined(meth, :specializations) || return
-        Base.visit(meth.specializations) do spec
-            spec == Void && return
+        cache = meth.sig.parameters[1].name.mt.cache
+        cache != nothing || return
+        Base.visit(cache) do spec
+            spec.def == meth || return
             predicate(spec) || return
             _breakpoint_spec(spec, bp)
         end
