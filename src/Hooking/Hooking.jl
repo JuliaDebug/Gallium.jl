@@ -18,7 +18,7 @@ immutable MemoryRegion
 end
 
 region_to_array(region::MemoryRegion) =
-    pointer_to_array(convert(Ptr{UInt8}, region.addr), (region.size,), false)
+    unsafe_wrap(Array, convert(Ptr{UInt8}, region.addr), (region.size,), false)
 
 # Windows Wrappers
 @static if is_windows()
@@ -180,6 +180,59 @@ function hook_asm_template(hook_addr, target_addr; call = true)
     [ call ? 0xe8 : 0xe9; reinterpret(UInt8, [Int32(diff)]); ]
 end
 
+function instrument_jmp_template(alt_stack, entry_func, exit_func)
+    instrument_exit = exit_func != 0
+    UInt8[
+        0x41; 0x53; 	   # pushq	%r11
+        0x49; 0x89; 0xe3   # movq %rsp, %r11
+        # movq alt_stack, %rsp
+        0x48; 0xbc; reinterpret(UInt8, [alt_stack]);
+        0x41; 0x53; 	   # pushq	%r11
+        0x41; 0x53; 	   # pushq	%r11
+        # movq entry_func, %r11
+        0x49; 0xbb; reinterpret(UInt8, [entry_func]);
+        0x41; 0xff; 0xd3;       # callq *%r11
+        0x41; 0x5b;             # popq	%r11
+        (instrument_exit ? [
+            # movq	8(%r11), %r11
+            0x4d; 0x8b; 0x5b; 0x08;
+            0x41; 0x53; 	   # pushq	%r11
+            0x41; 0x5b;        # popq	%r11
+        ] : []);
+        0x5c;                   # popq %rsp
+        instrument_exit ? [
+            # movq exit_func, %r11
+            0x49; 0xbb; reinterpret(UInt8, [exit_func]);
+            0x4c; 0x89; 0x5c; 0x24; 0x08; # movq	%r11, 8(%rsp)
+        ] : [];
+        0x41; 0x5b;             # popq	%r11
+    ]
+end
+
+function return_hook_template(alt_stack, func)
+    @assert func != 0
+    [
+        0x41; 0x53;         # pushq	%r11
+        0x41; 0x53;         # pushq	%r11
+        0x49; 0x89; 0xe3    # movq %rsp, %r11
+        # movq alt_stack-0x10, %rsp
+        0x48; 0xbc; reinterpret(UInt8, [alt_stack-0x10]);
+        0x41; 0x54;        # pushq  %r12
+        0x41; 0x53; 	   # pushq	%r11
+        0x49; 0xbb; reinterpret(UInt8, [func]);
+        0x41; 0xff; 0xd3;  # callq *%r11
+        0x41; 0x5b;        # popq	%r11
+        # movq	8(%rsp), %r12
+        0x4c; 0x8b; 0x64; 0x24; 0x08;
+        0x4d; 0x89; 0x63; 0x08; # movq	%r12, 8(%r11)
+        0x41; 0x5c;             # popq	%r12
+        0x4c; 0x89; 0xdc;       # movq	%r11, %rsp
+        0x41; 0x5b;             # popq	%r11
+        0xc3;                   # retq
+    ]
+end
+
+
 function hook_asm_template(addr)
     [
         0x90; # 0xcc
@@ -208,7 +261,7 @@ end
 # Split this out to avoid constructing a gc frame in the callback directly
 @noinline function _callback(x::Ptr{Void})
     RC = X86_64.BasicRegs()
-    regs = pointer_to_array(Ptr{UInt64}(x), (length(X86_64.basic_regs),), false)
+    regs = unsafe_wrap(Array, Ptr{UInt64}(x), (length(X86_64.basic_regs),), false)
     for i in X86_64.basic_regs
         set_dwarf!(RC, i, RegisterValue{UInt64}(regs[i+1], (-1%UInt64)))
     end
@@ -262,7 +315,7 @@ function __init__()
         ccall((:hooking_jl_jumpto, hooking_lib),Void,(Ptr{UInt8},),pointer(RC.data))
     end
     theresume = cglobal((:hooking_jl_jumpto, hooking_lib), Ptr{UInt8})
-    resume_instructions = pointer_to_array(convert(Ptr{UInt8}, theresume),
+    resume_instructions = unsafe_wrap(Array, convert(Ptr{UInt8}, theresume),
         (resume_length,), false)
     # Allocate an RWX page for the callback return
     callback_rwx = @static if is_apple()
@@ -353,7 +406,7 @@ function hook(callback::Function, addr)
     template = hook_asm_template()
     nbytes = determine_nbytes_to_replace(length(template), addr)
     # Record the instructions that were there originally
-    dest = pointer_to_array(convert(Ptr{UInt8}, addr), (nbytes,), false)
+    dest = unsafe_wrap(Array, convert(Ptr{UInt8}, addr), (nbytes,), false)
     orig_data = copy(dest)
 
     hook_asm = [ template; zeros(UInt8,nbytes-length(template)) ]# Pad to nbytes
@@ -371,7 +424,7 @@ function hook(thehook::Hook)
     template = hook_asm_template();
     hook_asm = [ template; zeros(UInt8,nbytes-length(template)) ]# Pad to nbytes
 
-    dest = pointer_to_array(convert(Ptr{UInt8}, thehook.addr),
+    dest = unsafe_wrap(Array, convert(Ptr{UInt8}, thehook.addr),
         (nbytes,), false)
     allow_writing(to_page(thehook.addr,nbytes)) do
         dest[:] = hook_asm
@@ -396,7 +449,7 @@ function unhook(addr::Union{Ptr{Void},UInt64})
     hook = pop!(hooks, addr)
 
     nbytes = length(hook.orig_data)
-    dest = pointer_to_array(convert(Ptr{UInt8}, addr),
+    dest = unsafe_wrap(Array, convert(Ptr{UInt8}, addr),
         (nbytes,), false)
 
     allow_writing(to_page(addr,nbytes)) do

@@ -115,7 +115,7 @@ module Gallium
         CallFrameInfo.dump_program(out, fde, cie = cie, target = UInt(target_delta), rs = drs)
         return false
     end
-    
+
     function find_module(session, modules, frame::CStackFrame)
         ip = frame.ip - (frame.stacktop ? 0 : 1)
         base, mod = find_module(session, modules, ip)
@@ -129,14 +129,14 @@ module Gallium
         base, mod = find_module(session, modules, ip)
         mod, base, ip
     end
-    
+
     function ASTInterpreter.execute_command(state, stack::GalliumFrame, ::Val{:handle}, command)
         Base.LineEdit.transition(state.s, :abort)
         mod, _, __ = modbaseip_for_stack(state, stack)
         eval(Main,:(h = $(handle(mod))))
         return false
     end
-    
+
     function compute_ip(handle, base, theip)
         if isa(handle, ELF.ELFHandle) && ObjFileBase.isexecutable(handle)
             phs = ELF.ProgramHeaders(handle)
@@ -157,9 +157,9 @@ module Gallium
         AbstractTrees.print_tree(show, IOContext(STDOUT,:strtab=>StrTab(dbgs.debug_str)), unit)
         return false
     end
-    
+
     function ASTInterpreter.execute_command(state, stack::GalliumFrame,
-            cmd::Union{Val{:cu},Val{:seh}}, command)
+            cmd::Val{:seh}, command)
         mod, base, ip = modbaseip_for_stack(state, stack)
         entry = Unwinder.find_seh_entry(mod, ip-base)
         i = 1
@@ -275,15 +275,76 @@ module Gallium
         Hooking.mem_validate(typetypeptr,sizeof(Ptr)) || return false
         UInt(unsafe_load(typetypeptr))&(~UInt(0x3)) == UInt(pointer_from_objref(DataType))
     end
-    
+
     function get_ipinfo(session::LocalSession, theip)
         Base.StackTraces.lookup(theip)
     end
-    
+
     function get_ipinfo(session, theip)
         sf = StackFrame(:unknown, "", 0, Nullable{LambdaInfo}(),
             true, false, theip)
         [sf]
+    end
+
+    function getreg(RC, fbreg, reg)
+        if reg == DWARF.DW_OP_fbreg
+            (fbreg == -1) && error("fbreg requested but not found")
+            UInt64(Gallium.get_dwarf(RC, fbreg))
+        else
+            UInt64(Gallium.get_dwarf(RC, reg))
+        end
+    end
+
+    function iterate_variables(RC, found_cb, not_found_cb, dbgs, lip)
+        cu = DWARF.searchcuforip(dbgs, lip)
+        sp = DWARF.searchspforip(cu, lip)
+
+        culow = DWARF.extract_attribute(cu,DWARF.DW_AT_low_pc)
+
+        fbreg = DWARF.extract_attribute(sp, DWARF.DW_AT_frame_base)
+        # Array is for DWARF 2 support.
+        fbreg = isnull(fbreg) ? -1 :
+            (isa(get(fbreg).value, Array) ? get(fbreg).value[1] : get(fbreg).value.expr[1]) - DWARF.DW_OP_reg0
+
+        getreg(reg) = Gallium.getreg(RC, fbreg, reg)
+        getword(addr) = unsafe_load(reinterpret(Ptr{UInt64}, addr))
+        addr_func(x) = x
+
+        for vardie in (filter(children(sp)) do child
+                    tag = DWARF.tag(child)
+                    tag == DWARF.DW_TAG_formal_parameter ||
+                    tag == DWARF.DW_TAG_variable
+                end)
+            name = DWARF.extract_attribute(vardie,DWARF.DW_AT_name)
+            loc = DWARF.extract_attribute(vardie,DWARF.DW_AT_location)
+            (isnull(name) || isnull(loc)) && continue
+            name = Symbol(bytestring(get(name).value,StrTab(dbgs.debug_str)))
+            loc = get(loc)
+            if loc.spec.form == DWARF.DW_FORM_exprloc
+                sm = DWARF.Expressions.StateMachine{typeof(loc.value).parameters[1]}()
+                val = DWARF.Expressions.evaluate_simple_location(
+                    sm, loc.value.expr, getreg, getword, addr_func, :NativeEndian)
+                found_cb(vardie, name, val)
+            elseif loc.spec.form == DWARF.DW_FORM_sec_offset
+                T = UInt64
+                seek(dbgs.debug_loc, loc.value.offset)
+                list = read(dbgs.debug_loc, DWARF.LocationList{T})
+                sm = DWARF.Expressions.StateMachine{T}()
+                found = false
+                for entry in list.entries
+                    if entry.first <= lip - UInt(culow.value) <= entry.last
+                        val = DWARF.Expressions.evaluate_simple_location(
+                            sm, entry.data, getreg, getword, addr_func, :NativeEndian)
+                        found = true
+                        found_cb(vardie, name, val)
+                        break
+                    end
+                end
+                found || not_found_cb(name)
+            else
+                not_found_cb(name)
+            end
+        end
     end
 
     function stackwalk(RC, session = LocalSession(), modules = active_modules;
@@ -328,7 +389,7 @@ module Gallium
                         line = entry.line
                         fileentry = linetab.header.file_names[entry.file]
                         file = fileentry.name
-                        
+
                         declfile = DWARF.extract_attribute(sp, DWARF.DW_AT_decl_file)
                         declfile = isnull(declfile) ? "" : linetab.header.file_names[convert(UInt,get(declfile))].name
                         declline = DWARF.extract_attribute(sp, DWARF.DW_AT_decl_line)
@@ -342,6 +403,8 @@ module Gallium
                 tlinfo = get(ipinfo.linfo)
                 env = ASTInterpreter.prepare_locals(tlinfo)
                 copy!(env.sparams, tlinfo.sparam_vals)
+                slottypes = tlinfo.slottypes
+                tlinfo = tlinfo.def.lambda_template
                 variables = Dict()
                 dbgs = debugsections(dhandle(h))
                 try
@@ -371,12 +434,12 @@ module Gallium
                     # Process Subprogram to extract local variables
                     strtab = ObjFileBase.load_strtab(dbgs.debug_str)
                     vartypes = Dict{Symbol,Type}()
-                    if tlinfo.slottypes === nothing
+                    if slottypes === nothing
                         for name in tlinfo.slotnames
                             vartypes[name] = Any
                         end
                     else
-                        for (name, ty) in zip(tlinfo.slotnames, tlinfo.slottypes)
+                        for (name, ty) in zip(tlinfo.slotnames, slottypes)
                             vartypes[name] = ty
                         end
                     end
@@ -385,65 +448,49 @@ module Gallium
                     fbreg = isnull(fbreg) ? -1 :
                         (isa(get(fbreg).value, Array) ? get(fbreg).value[1] : get(fbreg).value.expr[1]) - DWARF.DW_OP_reg0
                     variables = Dict()
-                    for vardie in (filter(children(sp)) do child
-                                tag = DWARF.tag(child)
-                                tag == DWARF.DW_TAG_formal_parameter ||
-                                tag == DWARF.DW_TAG_variable
-                            end)
-                        name = DWARF.extract_attribute(vardie,DWARF.DW_AT_name)
-                        loc = DWARF.extract_attribute(vardie,DWARF.DW_AT_location)
-                        (isnull(name) || isnull(loc)) && continue
-                        name = Symbol(bytestring(get(name).value,StrTab(dbgs.debug_str)))
-                        loc = get(loc)
-                        if loc.spec.form == DWARF.DW_FORM_exprloc
-                            sm = DWARF.Expressions.StateMachine{typeof(loc.value).parameters[1]}()
-                            function getreg(reg)
-                                if reg == DWARF.DW_OP_fbreg
-                                    (fbreg == -1) && error("fbreg requested but not found")
-                                    get_dwarf(RC, fbreg)
-                                else
-                                    get_dwarf(RC, reg)
-                                end
-                            end
-                            getword(addr) = unsafe_load(reinterpret(Ptr{UInt64}, addr))
-                            addr_func(x) = x
-                            val = DWARF.Expressions.evaluate_simple_location(
-                                sm, loc.value.expr, getreg, getword, addr_func, :NativeEndian)
-                            variables[name] = :found
-                            if isa(val, DWARF.Expressions.MemoryLocation)
-                                if isbits(vartypes[name])
-                                    val = unsafe_load(reinterpret(Ptr{vartypes[name]},
-                                        val.i))
-                                else
-                                    ptr = reinterpret(Ptr{Void}, val.i)
-                                    if ptr == C_NULL
+                    function found_cb(vardie, name, val)
+                        haskey(vartypes, name) || return
+                        variables[name] = :found
+                        if isa(val, DWARF.Expressions.MemoryLocation)
+                            if isbits(vartypes[name])
+                                val = unsafe_load(reinterpret(Ptr{vartypes[name]},
+                                    val.i))
+                            else
+                                ptr = reinterpret(Ptr{Void}, val.i)
+                                if ptr == C_NULL
+                                    val = Nullable{Ptr{vartypes[name]}}()
+                                elseif heap_validate(ptr)
+                                    val = unsafe_pointer_to_objref(ptr)
+                                # This is a heuristic. Should update to check
+                                # whether the variable is declared as jl_value_t
+                                elseif Hooking.mem_validate(ptr, sizeof(Ptr{Void}))
+                                    ptr2 = unsafe_load(Ptr{Ptr{Void}}(ptr))
+                                    if ptr2 == C_NULL
                                         val = Nullable{Ptr{vartypes[name]}}()
-                                    elseif heap_validate(ptr)
-                                        val = unsafe_pointer_to_objref(ptr)
-                                    # This is a heuristic. Should update to check
-                                    # whether the variable is declared as jl_value_t
-                                    elseif Hooking.mem_validate(ptr, sizeof(Ptr{Void}))
-                                        ptr2 = unsafe_load(Ptr{Ptr{Void}}(ptr))
-                                        if ptr2 == C_NULL
-                                            val = Nullable{Ptr{vartypes[name]}}()
-                                        elseif heap_validate(ptr2)
-                                            val = unsafe_pointer_to_objref(ptr2)
-                                        end
+                                    elseif heap_validate(ptr2)
+                                        val = unsafe_pointer_to_objref(ptr2)
                                     end
                                 end
-                                variables[name] = :available
-                            elseif isa(val, DWARF.Expressions.RegisterLocation)
-                                # The value will generally be in the low bits of the
-                                # register. This should give the appropriate value
-                                val = reinterpret(vartypes[name],[getreg(val.i)])[]
-                                variables[name] = :available
                             end
-                            varidx = findfirst(tlinfo.slotnames, name)
-                            if varidx != 0
-                                env.locals[varidx] = Nullable{Any}(val)
+                            variables[name] = :available
+                        elseif isa(val, DWARF.Expressions.RegisterLocation)
+                            # The value will generally be in the low bits of the
+                            # register. This should give the appropriate value
+                            val = getreg(RC, fbreg, val.i)
+                            if !isbits(vartypes[name])
+                                heap_validate(val) || return
+                                val = unsafe_pointer_to_objref(Ptr{Void}(val))
+                            else
+                                val = reinterpret(vartypes[name],[val])[]
                             end
+                            variables[name] = :available
+                        end
+                        varidx = findfirst(tlinfo.slotnames, name)
+                        if varidx != 0
+                            env.locals[varidx] = Nullable{Any}(val)
                         end
                     end
+                    iterate_variables(RC,found_cb,name->variables[name] = :found,dbgs,lip)
                 catch err
                     if !isa(err, ErrorException) || err.msg != "Not found"
                         @show err
@@ -651,8 +698,9 @@ module Gallium
 
     function _breakpoint_method(meth::Method, bp::Breakpoint, predicate = linfo->true)
         isdefined(meth, :specializations) || return
-        for spec in meth.specializations
-            predicate(spec) || continue
+        Base.visit(meth.specializations) do spec
+            spec == Void && return
+            predicate(spec) || return
             _breakpoint_spec(spec, bp)
         end
     end
