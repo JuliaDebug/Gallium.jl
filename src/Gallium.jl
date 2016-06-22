@@ -54,6 +54,10 @@ module Gallium
     end
     NativeStack(stack::Vector) = NativeStack(stack,Any[],active_modules,LocalSession())
 
+    function language_specific_prompt(state, stack::JuliaStackFrame)
+        state.julia_prompt
+    end
+
     ASTInterpreter.done!(stack::NativeStack) = nothing
 
     function ASTInterpreter.print_frame(io, num, x::JuliaStackFrame)
@@ -76,19 +80,21 @@ module Gallium
     ASTInterpreter.print_frame(io, num, x::NativeStack) =
         ASTInterpreter.print_frame(io, num, x.stack[end])
 
-    function ASTInterpreter.print_status(x::JuliaStackFrame; kwargs...)
+    function ASTInterpreter.print_status(state, x::JuliaStackFrame; kwargs...)
         if x.line < 0
             println("Got a negative line number. Bug?")
         elseif (!isa(x.file,AbstractString) || isempty(x.file)) || x.line == 0
             println("<No file found. Did DWARF parsing fail?>")
         else
+            dfile = Base.find_source_file(string(x.file))
             ASTInterpreter.print_sourcecode(x.linfo,
-                ASTInterpreter.readfileorhist(x.file), x.line)
+                ASTInterpreter.readfileorhist(
+                    dfile == nothing ? x.file : dfile), x.line)
         end
     end
 
-    function ASTInterpreter.print_status(x::NativeStack; kwargs...)
-        ASTInterpreter.print_status(x.stack[end]; kwargs...)
+    function ASTInterpreter.print_status(state, x::NativeStack; kwargs...)
+        ASTInterpreter.print_status(state, x.stack[end]; kwargs...)
     end
 
     function ASTInterpreter.get_env_for_eval(x::JuliaStackFrame)
@@ -113,6 +119,23 @@ module Gallium
         drs = CallFrameInfo.RegStates()
         CallFrameInfo.dump_program(out, cie, target = UInt(target_delta), rs = drs); println(out)
         CallFrameInfo.dump_program(out, fde, cie = cie, target = UInt(target_delta), rs = drs)
+        return false
+    end
+    
+    function obtain_linetable(state, stack)
+        mod, base, ip = modbaseip_for_stack(state, stack)
+        dbgs = debugsections(dhandle(mod))
+        lip = compute_ip(dhandle(mod), base, ip)
+        cu = DWARF.searchcuforip(dbgs, lip)
+        line_offset = get(DWARF.extract_attribute(cu, DWARF.DW_AT_stmt_list))
+        seek(dbgs.debug_line, UInt(line_offset.value))
+        DWARF.LineTableSupport.LineTable(handle(dbgs).io), lip
+    end
+    
+    function ASTInterpreter.execute_command(state, stack::GalliumFrame, ::Union{Val{:linetabprog}, Val{:linetab}}, command)
+        linetab = obtain_linetable(state, stack)[1]
+        (command == Val{:linetabprog} ? DWARF.LineTableSupport.dump_program :
+            DWARF.LineTableSupport.dump_table)(STDOUT, linetab)
         return false
     end
 
@@ -142,6 +165,8 @@ module Gallium
             phs = ELF.ProgramHeaders(handle)
             idx = findfirst(p->p.p_offset==0&&p.p_type==ELF.PT_LOAD, phs)
             UInt(theip + (phs[idx].p_vaddr - base))
+        elseif ObjFileBase.isrelocatable(handle)
+            UInt(theip)
         else
             UInt(theip - base)
         end
@@ -181,14 +206,6 @@ module Gallium
         elseif command == "sstart"
             println(x.sstart)
             return
-        elseif command == "linetabprog" || command == "linetab"
-            dbgs = debugsections(dhandle(x.oh))
-            cu = DWARF.searchcuforip(dbgs, lip)
-            line_offset = get(DWARF.extract_attribute(cu, DWARF.DW_AT_stmt_list))
-            seek(dbgs.debug_line, UInt(line_offset.value))
-            linetab = DWARF.LineTableSupport.LineTable(handle(dbgs).io)
-            (command == "linetabprog" ? DWARF.LineTableSupport.dump_program :
-                DWARF.LineTableSupport.dump_table)(STDOUT, linetab)
         elseif startswith(command, "bp")
             subcmds = split(command,' ')[2:end]
             if subcmds[1] == "list"
@@ -305,8 +322,9 @@ module Gallium
         # Array is for DWARF 2 support.
         fbreg = isnull(fbreg) ? -1 :
             (isa(get(fbreg).value, Array) ? get(fbreg).value[1] : get(fbreg).value.expr[1]) - DWARF.DW_OP_reg0
-
-        getreg(reg) = Gallium.getreg(RC, fbreg, reg)
+        
+        local getreg
+        getreg = (reg)->Gallium.getreg(RC, fbreg, reg)
         getword(addr) = unsafe_load(reinterpret(Ptr{UInt64}, addr))
         addr_func(x) = x
 
@@ -324,7 +342,7 @@ module Gallium
                 sm = DWARF.Expressions.StateMachine{typeof(loc.value).parameters[1]}()
                 val = DWARF.Expressions.evaluate_simple_location(
                     sm, loc.value.expr, getreg, getword, addr_func, :NativeEndian)
-                found_cb(vardie, name, val)
+                found_cb(dbgs, vardie, getreg, name, val)
             elseif loc.spec.form == DWARF.DW_FORM_sec_offset
                 T = UInt64
                 seek(dbgs.debug_loc, loc.value.offset)
@@ -336,15 +354,37 @@ module Gallium
                         val = DWARF.Expressions.evaluate_simple_location(
                             sm, entry.data, getreg, getword, addr_func, :NativeEndian)
                         found = true
-                        found_cb(vardie, name, val)
+                        found_cb(dbgs, vardie, getreg, name, val)
                         break
                     end
                 end
-                found || not_found_cb(name)
+                found || not_found_cb(dbgs, vardie, name)
             else
-                not_found_cb(name)
+                not_found_cb(dbgs, vardie, name)
             end
         end
+    end
+
+    function linetable_entry(dbgs, lip)
+        cu = DWARF.searchcuforip(dbgs, lip)
+        sp = DWARF.searchspforip(cu, lip)
+        # Process Compilation Unit to get line table
+        line_offset = DWARF.extract_attribute(cu, DWARF.DW_AT_stmt_list)
+        line_offset = isnull(line_offset) ? 0 : convert(UInt, get(line_offset).value)
+
+        seek(dbgs.debug_line, line_offset)
+        linetab = DWARF.LineTableSupport.LineTable(handle(dbgs).io)
+        entry = search_linetab(linetab, lip)
+        line = entry.line
+        fileentry = linetab.header.file_names[entry.file]
+        if fileentry.dir_idx == 0
+            found_file = Base.find_source_file(fileentry.name)
+            file = found_file != nothing ? found_file : fileentry.name
+        else
+            file = joinpath(linetab.header.include_directories[fileentry.dir_idx],
+                fileentry.name)
+        end
+        file, line, linetab
     end
 
     function stackwalk(RC, session = LocalSession(), modules = active_modules;
@@ -369,7 +409,7 @@ module Gallium
                 end
                 if rich_c
                     dh = dhandle(h)
-                    lip = compute_ip(dh, sstart, theip-1)
+                    lip = compute_ip(dh, sstart, theip-(firstframe?0:1))
                     local dbgs=nothing, cu=nothing, sp=nothing
 
                     try
@@ -379,17 +419,8 @@ module Gallium
                     catch
                     end
                     if sp !== nothing
-                        # Process Compilation Unit to get line table
-                        line_offset = DWARF.extract_attribute(cu, DWARF.DW_AT_stmt_list)
-                        line_offset = isnull(line_offset) ? 0 : convert(UInt, get(line_offset).value)
-
-                        seek(dbgs.debug_line, line_offset)
-                        linetab = DWARF.LineTableSupport.LineTable(handle(dbgs).io)
-                        entry = search_linetab(linetab, lip)
-                        line = entry.line
-                        fileentry = linetab.header.file_names[entry.file]
-                        file = fileentry.name
-
+                        file, line, linetab = linetable_entry(dbgs, lip)
+                        
                         declfile = DWARF.extract_attribute(sp, DWARF.DW_AT_decl_file)
                         declfile = isnull(declfile) ? "" : linetab.header.file_names[convert(UInt,get(declfile))].name
                         declline = DWARF.extract_attribute(sp, DWARF.DW_AT_decl_line)
@@ -412,24 +443,8 @@ module Gallium
                     if isrelocatable(handle(h))
                         lip = UInt(theip)-1
                     end
-                    cu = DWARF.searchcuforip(dbgs, lip)
-                    sp = DWARF.searchspforip(cu, lip)
-                    # Process Compilation Unit to get line table
-                    line_offset = DWARF.extract_attribute(cu, DWARF.DW_AT_stmt_list)
-                    line_offset = isnull(line_offset) ? 0 : convert(UInt, get(line_offset).value)
-
-                    seek(dbgs.debug_line, line_offset)
-                    linetab = DWARF.LineTableSupport.LineTable(handle(dbgs).io)
-                    entry = search_linetab(linetab, lip)
-                    line = entry.line
-                    fileentry = linetab.header.file_names[entry.file]
-                    if fileentry.dir_idx == 0
-                        found_file = Base.find_source_file(fileentry.name)
-                        file = found_file != nothing ? found_file : fileentry.name
-                    else
-                        file = joinpath(linetab.header.include_directories[fileentry.dir_idx],
-                            fileentry.name)
-                    end
+                    
+                    file, line, _ = linetable_entry(dbgs, lip)
 
                     # Process Subprogram to extract local variables
                     strtab = ObjFileBase.load_strtab(dbgs.debug_str)
@@ -443,12 +458,8 @@ module Gallium
                             vartypes[name] = ty
                         end
                     end
-                    fbreg = DWARF.extract_attribute(sp, DWARF.DW_AT_frame_base)
-                    # Array is for DWARF 2 support.
-                    fbreg = isnull(fbreg) ? -1 :
-                        (isa(get(fbreg).value, Array) ? get(fbreg).value[1] : get(fbreg).value.expr[1]) - DWARF.DW_OP_reg0
                     variables = Dict()
-                    function found_cb(vardie, name, val)
+                    function found_cb(dbgs, vardie, getreg, name, val)
                         haskey(vartypes, name) || return
                         variables[name] = :found
                         if isa(val, DWARF.Expressions.MemoryLocation)
@@ -476,10 +487,15 @@ module Gallium
                         elseif isa(val, DWARF.Expressions.RegisterLocation)
                             # The value will generally be in the low bits of the
                             # register. This should give the appropriate value
-                            val = getreg(RC, fbreg, val.i)
+                            val = getreg(val.i)
                             if !isbits(vartypes[name])
-                                heap_validate(val) || return
-                                val = unsafe_pointer_to_objref(Ptr{Void}(val))
+                                if val == 0
+                                    val = Nullable{vartypes[name]}()
+                                elseif heap_validate(val)
+                                    val = unsafe_pointer_to_objref(Ptr{Void}(val))
+                                else
+                                    return
+                                end
                             else
                                 val = reinterpret(vartypes[name],[val])[]
                             end
@@ -490,7 +506,7 @@ module Gallium
                             env.locals[varidx] = Nullable{Any}(val)
                         end
                     end
-                    iterate_variables(RC,found_cb,name->variables[name] = :found,dbgs,lip)
+                    iterate_variables(RC,found_cb,(dbgs, vardie, name)->variables[name] = :found,dbgs,lip)
                 catch err
                     if !isa(err, ErrorException) || err.msg != "Not found"
                         @show err
@@ -524,6 +540,8 @@ module Gallium
         for bp in bps_at_location[loc]
             for cond in bp.conditions
                 isa(cond, Function) && cond(loc, RC) && return true
+                # Will get evaluated later
+                isa(cond, Expr) && return true
                 stop = false
             end
         end
@@ -566,12 +584,13 @@ module Gallium
         stack = stackwalk(RC; fromhook = true)[1]
         stacktop = pop!(stack)
         linfo = stacktop.linfo
-        argnames = linfo.slotnames[2:linfo.nargs]
         spectypes = linfo.specTypes.parameters[2:end]
+        def_linfo = linfo.def.lambda_template
+        argnames = def_linfo.slotnames[2:def_linfo.nargs]
         bps = bps_at_location[Location(LocalSession(),hook.addr)]
         target_line = minimum(map(bps) do bp
             idx = findfirst(s->isa(s, FileLineSource), bp.sources)
-            idx != 0 ? bp.sources[idx].line : linfo.def.line
+            idx != 0 ? bp.sources[idx].line : def_linfo.def.line
         end)
         conditions = reduce(vcat,map(bp->bp.conditions, bps))
         thunk = Expr(:->,Expr(:tuple,argnames...),Expr(:block,
