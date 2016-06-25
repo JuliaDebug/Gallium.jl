@@ -584,22 +584,23 @@ module Gallium
         stack = stackwalk(RC; fromhook = true)[1]
         stacktop = pop!(stack)
         linfo = stacktop.linfo
-        spectypes = linfo.specTypes.parameters[2:end]
+        fT = linfo.def.sig.parameters[1]
         def_linfo = linfo.def.lambda_template
         argnames = def_linfo.slotnames[2:def_linfo.nargs]
+        argnames = [Symbol("#target_self#");linfo.slotnames[2:linfo.nargs]]
+        spectypes = [fT;linfo.specTypes.parameters[2:end]...]
         bps = bps_at_location[Location(LocalSession(),hook.addr)]
         target_line = minimum(map(bps) do bp
             idx = findfirst(s->isa(s, FileLineSource), bp.sources)
             idx != 0 ? bp.sources[idx].line : def_linfo.def.line
         end)
         conditions = reduce(vcat,map(bp->bp.conditions, bps))
-        thunk = Expr(:->,Expr(:tuple,argnames...),Expr(:block,
+        thunk = Expr(:->,Expr(:tuple,map(x->Expr(:(::),x[1],x[2]),zip(argnames,spectypes))...),Expr(:block,
             :(linfo = $(quot(linfo))),
             :((loctree, code) = ASTInterpreter.reparse_meth(linfo)),
             :(__env = ASTInterpreter.prepare_locals(linfo.def.lambda_template)),
             :(copy!(__env.sparams, linfo.sparam_vals)),
-            :(__env.locals[1] = Nullable{Any}()),
-            [ :(__env.locals[$i + 1] = Nullable{Any}($(argnames[i]))) for i = 1:length(argnames) ]...,
+            [ :(__env.locals[$i] = Nullable{Any}($(argnames[i]))) for i = 1:length(argnames) ]...,
             :(interp = ASTInterpreter.enter(linfo,__env,
                 $(collect(filter(x->!isa(x,CStackFrame),stack)));
                     loctree = loctree, code = code)),
@@ -614,7 +615,8 @@ module Gallium
             :(ASTInterpreter.finish!(interp)),
             :(return interp.retval::$(linfo.rettype))))
         f = eval(thunk)
-        faddr = Hooking.get_function_addr(f, Tuple{spectypes...})
+        t = Tuple{spectypes...}
+        faddr = Hooking.get_function_addr(f, t)
         Hooking.Deopt(faddr)
     end
     abstract LocationSource
