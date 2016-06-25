@@ -175,7 +175,7 @@ find_ehfr(h) = EhFrameRef(find_eh_frame_hdr(h), find_ehframes(h)[1])
             for idx in (modules.nsharedlibs+1):nactuallibs
                 idx -= 1
                 base = ccall(:_dyld_get_image_vmaddr_slide, UInt, (UInt32,), idx)
-                fname = bytestring(
+                fname = unsafe_string(
                     ccall(:_dyld_get_image_name, Ptr{UInt8}, (UInt32,), idx))
                 # hooking is weird
                 contains(fname, "hooking.dylib") &&

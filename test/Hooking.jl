@@ -30,7 +30,6 @@ Hooking.hook(bigfib, Tuple{Int}) do hook, RC
         @show (ccall(:jl_lookup_code_address, Any, (Ptr{Void}, Cint),
             reinterpret(Ptr{Void},ip-1), 0))[1]
     end
-    println("test")
 end
 bigfib(20)
 

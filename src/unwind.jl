@@ -242,11 +242,11 @@ function unwind_step(s, modules, r, cfi_cache = nothing; stacktop = false, ip_on
     # over from above still and propagate as usual in case somebody wants to
     # look at them.
     invalidate_regs!(new_registers)
-    
+
     # First, find the module we're currently in
     base, mod = find_module(s, modules, UInt(ip(r)))
     modrel = UInt64(ip(r)) - base
-    
+
     # Determine if we have windows or DWARF unwind info
     if isnull(mod.xpdata)
         cf = try

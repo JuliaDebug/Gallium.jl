@@ -586,8 +586,7 @@ module Gallium
         linfo = stacktop.linfo
         fT = linfo.def.sig.parameters[1]
         def_linfo = linfo.def.lambda_template
-        argnames = def_linfo.slotnames[2:def_linfo.nargs]
-        argnames = [Symbol("#target_self#");linfo.slotnames[2:linfo.nargs]]
+        argnames = [Symbol("#target_self#");def_linfo.slotnames[2:def_linfo.nargs]]
         spectypes = [fT;linfo.specTypes.parameters[2:end]...]
         bps = bps_at_location[Location(LocalSession(),hook.addr)]
         target_line = minimum(map(bps) do bp
