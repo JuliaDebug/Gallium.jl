@@ -806,7 +806,11 @@ module Gallium
     end
 
     function _breakpoint_concrete(bp, t)
-        addr = Hooking.get_function_addr(t)
+        try
+            addr = Hooking.get_function_addr(t)
+        catch err
+            error("no method found for the specified argument types")
+        end
         add_location(bp, Location(LocalSession(),addr))
     end
 
