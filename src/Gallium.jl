@@ -257,6 +257,12 @@ module Gallium
         ips
     end
 
+    function rec_backtrace_hook(RC)
+        ips = Array(UInt64, 0)
+        rec_backtrace_hook(RC->(push!(ips,ip(RC)); true), RC)
+        ips
+    end
+
     global active_modules = LazyJITModules()
     function rec_backtrace(callback, RC, session = LocalSession(), modules = active_modules, ip_only = false, cfi_cache = nothing; stacktop = true)
         callback(RC) || return

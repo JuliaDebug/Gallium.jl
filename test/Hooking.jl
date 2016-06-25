@@ -26,9 +26,11 @@ ccall(:jl_,Void,(Any,),Hooking.hook)
 bigfib(n) = ((BigInt[1 1; 1 0])^n)[2,1]
 
 Hooking.hook(bigfib, Tuple{Int}) do hook, RC
-    for ip in Gallium.rec_backtrace(RC)
-        @show (ccall(:jl_lookup_code_address, Any, (Ptr{Void}, Cint),
-            reinterpret(Ptr{Void},ip-1), 0))[1]
+    ips = Gallium.rec_backtrace_hook(RC)
+    @assert length(ips) >= 10
+    for ip in ips
+        frames = ccall(:jl_lookup_code_address, Any, (Ptr{Void}, Cint),
+            reinterpret(Ptr{Void},ip-1), 0)
     end
 end
 bigfib(20)

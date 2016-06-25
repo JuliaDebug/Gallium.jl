@@ -54,9 +54,10 @@ end
 function entry_cfa(mod, r)
     rs = DWARF.CallFrameInfo.RegStates()
     regs = Gallium.X86_64.inverse_dwarf
-    cfa_addr = RemotePtr{Void}(get_dwarf(r, regs[:rbp])[])
-    rs[regs[:rip]] = DWARF.CallFrameInfo.Offset(0x0, false)
-    cfa_addr, rs, DWARF.CallFrameInfo.CIE(0,0,0,regs[:rip],UInt8[]), 0
+    rs.cfa = DWARF.CallFrameInfo.Offset(
+        DWARF.CallFrameInfo.RegNum(regs[:rbp]), 0)
+    rs[regs[:rip]] = DWARF.CallFrameInfo.Load(DWARF.CallFrameInfo.RegCFA, 0)
+    rs, DWARF.CallFrameInfo.CIE(0,0,0,regs[:rip],UInt8[]), UInt64(0)
 end
 
 function modulerel(mod, base, ip)
