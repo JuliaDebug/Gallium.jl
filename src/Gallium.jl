@@ -54,8 +54,11 @@ module Gallium
     end
     NativeStack(stack::Vector) = NativeStack(stack,Any[],active_modules,LocalSession())
 
-    function language_specific_prompt(state, stack::JuliaStackFrame)
+    function ASTInterpreter.language_specific_prompt(state, stack::JuliaStackFrame)
         state.julia_prompt
+    end
+    function ASTInterpreter.language_specific_prompt(state, stack::NativeStack)
+        ASTInterpreter.language_specific_prompt(state, stack.stack[end])
     end
 
     ASTInterpreter.done!(stack::NativeStack) = nothing
@@ -279,8 +282,8 @@ module Gallium
     end
 
     function step_first!(RC)
-        set_ip!(RC,unsafe_load(convert(Ptr{UInt},RC.rsp[])))
-        set_sp!(RC,RC.rsp[]+sizeof(Ptr{Void}))
+        set_ip!(RC,unsafe_load(convert(Ptr{UInt},get_dwarf(RC,:rsp)[])))
+        set_sp!(RC,get_dwarf(RC,:rsp)[]+sizeof(Ptr{Void}))
     end
 
     function rec_backtrace_hook(callback, RC, session = LocalSession(), modules = active_modules, ip_only = false)
@@ -312,9 +315,9 @@ module Gallium
     function getreg(RC, fbreg, reg)
         if reg == DWARF.DW_OP_fbreg
             (fbreg == -1) && error("fbreg requested but not found")
-            UInt64(Gallium.get_dwarf(RC, fbreg))
+            Gallium.get_dwarf(RC, fbreg)
         else
-            UInt64(Gallium.get_dwarf(RC, reg))
+            Gallium.get_dwarf(RC, reg)
         end
     end
 
@@ -806,8 +809,8 @@ module Gallium
     end
 
     function _breakpoint_concrete(bp, t)
-        try
-            addr = Hooking.get_function_addr(t)
+        addr = try
+            Hooking.get_function_addr(t)
         catch err
             error("no method found for the specified argument types")
         end
@@ -866,14 +869,22 @@ module Gallium
     # simple, stupid thing.
     function breakpoint()
         RC = Hooking.getcontext()
-        # -2 to skip getcontext and breakpoint()
-        ASTInterpreter.RunDebugREPL(NativeStack(filter(x->isa(x,JuliaStackFrame),stackwalk(RC; fromhook = true)[1:end-2])))
+        # -1 to skip breakpoint (getcontext is inlined)
+        stack, RCs = stackwalk(RC; fromhook = false)
+        ASTInterpreter.RunDebugREPL(NativeStack(collect(filter(x->isa(x,JuliaStackFrame),stack[1:end-1]))))
     end
 
+    const bp_on_error_conditions = Any[]
     function breakpoint_on_error_hit(thehook, RC)
         unhook(thehook)
-        err = unsafe_pointer_to_objref(Ptr{Void}(RC.rdi[]))
+        err = unsafe_pointer_to_objref(Ptr{Void}(get_dwarf(RC, :rdi)[]))
         stack = stackwalk(RC; fromhook = true)[1]
+        stack = NativeStack(filter(x->isa(x,JuliaStackFrame),stack))
+        if !isempty(bp_on_error_conditions) &&
+            !any(c->Gallium.matches_condition(stack,c),bp_on_error_conditions)
+            hook(thehook)
+            rethrow(err)
+        end
         ips = [x.ip-1 for x in stack]
         Base.with_output_color(:red, STDERR) do io
             print(io, "ERROR: ")
@@ -881,7 +892,7 @@ module Gallium
             println(io)
         end
         println(STDOUT)
-        ASTInterpreter.RunDebugREPL(NativeStack(filter(x->isa(x,JuliaStackFrame),stack)))
+        ASTInterpreter.RunDebugREPL()
         # Get a somewhat sensible backtrace when returning
         try; throw(); catch; end
         hook(thehook)

@@ -2,6 +2,7 @@ module X86_64
   using ..Registers
   abstract RegisterSet <: Registers.RegisterSet
   using MachO
+  import Base: copy
 
   # See http://www.x86-64.org/documentation/abi-0.99.7.pdf
   const dwarf_numbering = Dict{Int, Symbol}(
@@ -21,6 +22,7 @@ module X86_64
   66 => :fsw)
   const inverse_dwarf = map(p->p[2]=>p[1], dwarf_numbering)
   const basic_regs = 0:16
+  const extended_registers = 17:32
 
   const gdb_numbering = Dict{Int, Symbol}(
      0 => :rax, 1 => :rbx, 2 => :rcx, 3 => :rdx,
@@ -40,22 +42,35 @@ module X86_64
 
   # Basic Register Set
   const RegT = RegisterValue{UInt64}
+  const ExtendedRegT = RegisterValue{UInt128}
   @eval type BasicRegs <: RegisterSet
       $(Expr(:block, (
         :($(dwarf_numbering[i]) :: RegT) for i in basic_regs
       )...))
       BasicRegs() = new()
   end
-  Registers.ip(regs::RegisterSet) = regs.rip
-  Registers.set_ip!(regs::RegisterSet, ip) = regs.rip = RegisterValue{UInt64}(ip)
-  Registers.set_sp!(regs::RegisterSet, sp) = regs.rsp = RegisterValue{UInt64}(sp)
-  function Registers.invalidate_regs!(regs::BasicRegs)
+  type ExtendedRegs <: RegisterSet
+      basic::BasicRegs
+      xsave_state::NTuple{832, UInt8}
+  end
+
+  import ..Registers: ip, set_ip!, set_sp!, invalidate_regs!
+
+  ip(regs::BasicRegs) = regs.rip
+  set_ip!(regs::BasicRegs, ip) = regs.rip = RegisterValue{UInt64}(ip)
+  set_sp!(regs::BasicRegs, sp) = regs.rsp = RegisterValue{UInt64}(sp)
+  function invalidate_regs!(regs::BasicRegs)
       for fieldi = 1:nfields(regs)
           setfield!(regs, fieldi, Registers.invalidated(getfield(regs, fieldi)))
       end
   end
 
-  function Base.copy(regs::BasicRegs)
+  for f in (:ip, :set_ip!, :set_sp!, :invalidate_regs!)
+    @eval $(f)(regs::ExtendedRegs, args...) = $(f)(regs.basic, args...)
+  end
+
+  copy(regs::ExtendedRegs) = ExtendedRegs(copy(regs.basic),regs.xsave_state)
+  function copy(regs::BasicRegs)
       ret = BasicRegs()
       for i = 1:nfields(regs)
           setfield!(ret, i, getfield(regs, i))
@@ -70,13 +85,37 @@ module X86_64
   end
 
   function Registers.set_dwarf!(regs::BasicRegs, reg::Integer, value)
-      (reg <= endof(basic_regs)) && setfield!(regs, reg+1, RegisterValue{UInt64}(value))
+      (reg <= last(basic_regs)) && setfield!(regs, reg+1, RegisterValue{UInt64}(value))
   end
 
   function Registers.get_dwarf(regs::BasicRegs, reg::Integer)
-      (reg <= endof(basic_regs)) ? getfield(regs, reg+1) :
+      (reg <= last(basic_regs)) ? getfield(regs, reg+1) :
         RegisterValue{UInt64}(0, 0)
   end
+
+  function Registers.get_dwarf(regs::ExtendedRegs, reg::Integer)
+      if reg <= last(basic_regs)
+        get_dwarf(regs.basic, reg)
+      elseif reg <= last(extended_registers)
+        # XMM registers
+        startoff = 160+16*(reg - first(extended_registers))
+        endoff = startoff + 16
+        reinterpret(UInt128,
+          reinterpret(UInt8,[regs.xsave_state])[startoff:endoff])[]
+      else
+        error("Extraction not yet implemented for this register")
+      end
+  end
+
+  function Registers.set_dwarf!(regs::ExtendedRegs, reg::Integer, value)
+    if reg <= last(basic_regs)
+      set_dwarf!(regs.basic, reg, value)
+    else
+      error("Extraction not yet implemented for this register")
+    end
+  end
+
+
 
   const state_64_regs = [:rax, :rbx, :rcx, :rdx, :rdi, :rsi, :rbp, :rsp,
     (Symbol("r$i") for i = 8:15)..., :rip, #= :rflags, :cs, :fs, :gs =#]

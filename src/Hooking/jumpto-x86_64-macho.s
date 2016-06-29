@@ -4,6 +4,10 @@
 .globl _hooking_jl_jumpto
 _hooking_jl_jumpto:
 int $3
+# Restore FP and SSE state (RFBM = 0b11)
+movq $3, %rax
+xor %rdx, %rdx
+xrstor  UC_MCONTEXT_SIZE(%rdi)
 movq    UC_MCONTEXT_GREGS_RSP(%rdi), %rax # rax holds new stack pointer
 subq    $16, %rax
 movq    %rax, 56(%rdi)
@@ -35,5 +39,3 @@ movq     UC_MCONTEXT_GREGS_R15(%rdi), %r15
 movq    UC_MCONTEXT_GREGS_RSP(%rdi), %rsp  # cut back rsp to new location
 pop     %rdi            # rdi was saved here earlier
 ret                     # rip was saved here
-
-.section	.note.GNU-stack,"",@progbits

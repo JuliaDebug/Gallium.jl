@@ -22,3 +22,48 @@ hit_breakpoint = false
 
 @test fkeywords(1) == 3
 @test hit_breakpoint
+
+# Floating point value recovery
+hit_breakpoint = false
+function f131(x)
+    y=x+1
+    z=2y
+    return z
+end
+@conditional breakpoint(f131) (global hit_breakpoint = true; (@test x==3.0); false)
+f131(3.0)
+@test hit_breakpoint
+
+# Floating point value recovery in breakpoint()
+@noinline function do_xmmbptest()
+    # Manually do what's done in breakpoint() to look at the stack
+    RC = Hooking.getcontext()
+    # -1 to skip breakpoint (getcontext is inlined)
+    stack, RCs = Gallium.stackwalk(RC; fromhook = false)
+    frame = collect(filter(x->isa(x,Gallium.JuliaStackFrame),stack))[end-1]
+    id = findfirst(sym->sym==:y,frame.linfo.def.lambda_template.slotnames)
+    @test 2.0 == get(frame.env.locals[id])
+end
+
+function xmmbptest(x)
+    y = x+1.0
+    do_xmmbptest()
+    # Make sure to keep this live
+    y
+end
+@test xmmbptest(1.0) == 2.0
+
+# Floating point value recovery in breakpoint_on_error()
+using Gallium
+function xmmerrtest(x)
+    y = x+1.0
+    error(y)
+    y
+end
+hit_breakpoint = false
+Gallium.breakpoint_on_error()
+push!(Gallium.bp_on_error_conditions,:(@test y == 2.0; global hit_breakpoint = true; false))
+try; xmmerrtest(1.0); end
+@test hit_breakpoint
+empty!(Gallium.bp_on_error_conditions)
+Gallium.breakpoint_on_error(false)

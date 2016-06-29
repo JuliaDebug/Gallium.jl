@@ -8,9 +8,13 @@ function rebuild_lib(file, triple, oname)
         contents = replace(contents,
             pat, string(idx*sizeof(Ptr{Void})))
     end
-    contents = replace(contents, "UC_MCONTEXT_SIZE", length(basic_regs)*sizeof(Ptr{Void}))
+    xsave_area_size = sizeof(fieldtype(Gallium.X86_64.ExtendedRegs,:xsave_state))
+    basic_size = length(basic_regs)*sizeof(Ptr{Void})
+    contents = replace(contents, "UC_MCONTEXT_SIZE", basic_size)
+    contents = replace(contents, "UC_MCONTEXT_TOTAL_SIZE", xsave_area_size + basic_size)
     print(contents)
-    (stdout,stdin,process) = readandwrite(`$(joinpath(JULIA_HOME,"llvm-mc")) -triple= -filetype=obj - -o $oname`)
+    cmd = `$(joinpath(JULIA_HOME,"../tools/llvm-mc")) -triple=$triple -filetype=obj - -o $oname`
+    (stdout,stdin,process) = readandwrite(cmd)
     write(stdin, contents)
     close(stdin)
     wait(process)

@@ -170,8 +170,8 @@ immutable Deopt
     addr::Ptr{Void}
 end
 
-# The text section of jumpto-x86_64-macho.o
-const resume_length = 0x5b
+# The text section of jumpto-x86_64-macho.o minus one byte
+const resume_length = 0x6c
 
 function hook_asm_template(hook_addr, target_addr; call = true)
     diff = (target_addr - (hook_addr + 5))%Int32
@@ -258,6 +258,20 @@ function hook_tail_template(extra_instructions, ret_addr)
     ]
 end
 
+function aligned_xsave_RC()
+    RCnew = Array(UInt8,length(X86_64.basic_regs)*sizeof(UInt64) +
+        sizeof(fieldtype(X86_64.ExtendedRegs,:xsave_state)) + 64)
+
+    rcptr = pointer(RCnew)
+    # Align to 56 bytes (so the xsave state ends up at 64 byte alignment)
+    npad = (64 - (UInt64(rcptr) % 64)) - 8
+    @assert npad > 0
+    rcptr += npad
+    @assert (UInt64(rcptr) % 64) == 56
+
+    RCnew, rcptr
+end
+
 # Split this out to avoid constructing a gc frame in the callback directly
 @noinline function _callback(x::Ptr{Void})
     RC = X86_64.BasicRegs()
@@ -265,6 +279,9 @@ end
     for i in X86_64.basic_regs
         set_dwarf!(RC, i, RegisterValue{UInt64}(regs[i+1], (-1%UInt64)))
     end
+    xsave_ptr = Ptr{UInt8}(x+sizeof(Ptr{Void})*length(X86_64.basic_regs))
+    RC = X86_64.ExtendedRegs(RC,
+        unsafe_load(Ptr{fieldtype(X86_64.ExtendedRegs,:xsave_state)}(xsave_ptr)))
     hook_addr = UInt(ip(RC))-hook_length
     hook = hooks[reinterpret(Ptr{Void},hook_addr)]
     cb_RC = copy(RC)
@@ -290,9 +307,19 @@ end
     # invalidate instruction cache here if ever ported to other
     # architectures
 
-    RC = UInt64[get_dwarf(RC, i)[] for i in X86_64.basic_regs]
+    RCnew, rcptr = aligned_xsave_RC()
+    npad = UInt(rcptr - pointer(RCnew))
+
+    # For alignment purposes
+    RCnew[1:npad] = 0
+    RCnew[npad+1:end] = UInt8[reinterpret(UInt8,
+        UInt64[
+            [get_dwarf(RC, i)[] for i in X86_64.basic_regs];
+            reinterpret(UInt64,[RC.xsave_state])]);
+        UInt8[0 for i = 1:(64-npad)]]
+
     ptr = convert(Ptr{Void},pointer(callback_rwx))::Ptr{Void}
-    ptr, Ptr{UInt64}(pointer(RC))::Ptr{UInt64}
+    ptr, Ptr{UInt64}(rcptr)::Ptr{UInt64}
 end
 function callback(x::Ptr{Void})
     enabled = gc_enable(false)
@@ -459,13 +486,16 @@ end
 
 unhook(hook::Hook) = unhook(hook.addr)
 
-function getcontext()
-    ctx = Array(UInt64,length(X86_64.basic_regs))
-    ccall((:hooking_jl_simple_savecontext, hooking_lib),Void,(Ptr{UInt64},),ctx)
+@inline function getcontext()
+    RCnew, rcptr = aligned_xsave_RC()
+    ccall((:hooking_jl_simple_savecontext, hooking_lib),Void,(Ptr{UInt64},),rcptr)
     RC = X86_64.BasicRegs()
     for i in X86_64.basic_regs
-        set_dwarf!(RC, i, RegisterValue{UInt64}(ctx[i+1], (-1%UInt64)))
+        set_dwarf!(RC, i, RegisterValue{UInt64}(unsafe_load(Ptr{UInt64}(rcptr),i+1), (-1%UInt64)))
     end
+    xsave_ptr = Ptr{UInt8}(rcptr+sizeof(Ptr{Void})*length(X86_64.basic_regs))
+    RC = X86_64.ExtendedRegs(RC,
+        unsafe_load(Ptr{fieldtype(X86_64.ExtendedRegs,:xsave_state)}(xsave_ptr)))
     RC
 end
 
