@@ -436,7 +436,7 @@ function hook(callback::Function, addr)
     dest = unsafe_wrap(Array, convert(Ptr{UInt8}, addr), (nbytes,), false)
     orig_data = copy(dest)
 
-    hook_asm = [ template; zeros(UInt8,nbytes-length(template)) ]# Pad to nbytes
+    hook_asm = [ template; fill(0xcc,nbytes-length(template)) ]# Pad to nbytes
     @assert length(hook_asm) == length(orig_data)
 
     allow_writing(to_page(addr,nbytes)) do

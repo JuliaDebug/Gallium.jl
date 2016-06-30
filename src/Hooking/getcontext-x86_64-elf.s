@@ -62,7 +62,7 @@ movq    %rsp,    %rdi
 # Align stack for call
 subq    $8, %rsp
 pushq   %rsi           # Makes the debugger's life easier
-movq _hooking_jl_callback@GOTPCREL(%rip), %rax
+movq hooking_jl_callback@GOTPCREL(%rip), %rax
 jmpq *(%rax)
 
 

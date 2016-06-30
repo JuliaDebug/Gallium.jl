@@ -294,7 +294,7 @@ module Gallium
 
     # Validate that an address is a valid location in the julia heap
     function heap_validate(ptr)
-        typeptr = Ptr{Ptr{Void}}(ptr-sizeof(Ptr))
+        typeptr = Ptr{Ptr{Void}}(UInt64(ptr)-sizeof(Ptr{Void}))
         Hooking.mem_validate(typeptr,sizeof(Ptr)) || return false
         T = UInt(unsafe_load(typeptr))&(~UInt(0x3))
         typetypeptr = Ptr{Ptr{Void}}(T-sizeof(Ptr))
@@ -473,8 +473,13 @@ module Gallium
                         variables[name] = :found
                         if isa(val, DWARF.Expressions.MemoryLocation)
                             if isbits(vartypes[name])
-                                val = unsafe_load(reinterpret(Ptr{vartypes[name]},
-                                    val.i))
+                                ptr = reinterpret(Ptr{Void}, val.i)
+                                if ptr != C_NULL && heap_validate(ptr)
+                                    val = unsafe_load(reinterpret(Ptr{vartypes[name]},
+                                        ptr))
+                                else
+                                    val = Nullable{vartypes[name]}()
+                                end
                             else
                                 ptr = reinterpret(Ptr{Void}, val.i)
                                 if ptr == C_NULL
@@ -496,7 +501,7 @@ module Gallium
                         elseif isa(val, DWARF.Expressions.RegisterLocation)
                             # The value will generally be in the low bits of the
                             # register. This should give the appropriate value
-                            val = getreg(val.i)
+                            val = getreg(val.i)[]
                             if !isbits(vartypes[name])
                                 if val == 0
                                     val = Nullable{vartypes[name]}()
@@ -846,7 +851,7 @@ module Gallium
         ccall(:jl_register_linfo_tracer, Void, (Ptr{Void},), cfunction(rebreak_tracer,Void,(Ptr{Void},)))
         ccall(:jl_register_method_tracer, Void, (Ptr{Void},), cfunction(method_tracer,Void,(Ptr{Void},)))
         arm_breakfile()
-        update_shlibs!(active_modules)
+        update_shlibs!(LocalSession(), active_modules)
     end
 
     function breakpoint(f)
