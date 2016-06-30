@@ -168,8 +168,13 @@ find_eh_frame_hdr{T}(m::Module{T}) = (get(mod.ehfr).hdr_sec)::SectionRef(T)
 find_ehfr(mod::Module) = get(mod.ehfr)
 find_ehfr(h) = EhFrameRef(find_eh_frame_hdr(h), find_ehframes(h)[1])
 
+function update_shlibs(session, modules)
+    return false
+end
+
+
 @static if is_apple()
-    function update_shlibs!(modules)
+    function update_shlibs!(session::LocalSession, modules)
         nactuallibs = ccall(:_dyld_image_count, UInt32, ())
         if modules.nsharedlibs != nactuallibs
             for idx in (modules.nsharedlibs+1):nactuallibs
@@ -214,8 +219,59 @@ elseif is_windows()
         return false
     end
 elseif is_linux()
-    function update_shlibs!(modules)
-        return false
+    immutable dl_phdr_info
+        # Base address of object
+        addr::Ptr{Void}
+
+        # Null-terminated name of object
+        name::Ptr{UInt8}
+
+        # Pointer to array of ELF program headers for this object
+        phdr::Ptr{Void}
+
+        # Number of program headers for this object
+        phnum::Cshort
+    end
+
+    const LibArray = Array{Tuple{String,Ptr{Void}},1}
+
+    # This callback function called by dl_iterate_phdr() on Linux
+    function dl_phdr_info_callback(di::dl_phdr_info, size::Csize_t, dynamic_libraries::LibArray)
+        # Skip over objects without a path (as they represent this own object)
+        name = unsafe_string(di.name)
+        push!(dynamic_libraries, (name, di.addr))
+        return convert(Cint, 0)::Cint
+    end
+
+    function update_shlibs!(sesssion::LocalSession, modules)
+        dynamic_libraries = LibArray(0)
+
+        @static if is_linux()
+            const callback = cfunction(dl_phdr_info_callback, Cint,
+                                       (Ref{dl_phdr_info}, Csize_t, Ref{LibArray} ))
+            ccall(:dl_iterate_phdr, Cint, (Ptr{Void}, Ref{LibArray}), callback, dynamic_libraries)
+        end
+
+        for (fname,base) in dynamic_libraries[modules.nsharedlibs+1:end]
+            is_exe = isempty(fname)
+            if is_exe
+                fname = readlink("/proc/self/exe")
+            end
+            # hooking is weird
+            contains(fname, "hooking.so") &&
+                continue
+            h = readmeta(IOBuffer(open(read, fname)))
+            if is_exe
+                phs = ELF.ProgramHeaders(h)
+                idx = findfirst(p->p.p_offset==0&&p.p_type==ELF.PT_LOAD, phs)
+                base += phs[idx].p_vaddr
+            end
+            modules.modules[UInt64(base)] = GlibcDyldModules.mod_for_h(h, fname)
+        end
+
+        did_update = length(dynamic_libraries) > modules.nsharedlibs
+        modules.nsharedlibs = length(dynamic_libraries)
+        did_update
     end
 end
 
@@ -259,7 +315,7 @@ retrieve_section_start(s::LocalSession, ip) =
 function find_module(session, modules::LazyJITModules, ip)
     ret = _find_module(modules.modules, ip)
     return !isnull(ret) ? get(ret) : begin
-        if update_shlibs!(modules)
+        if update_shlibs!(session, modules)
             return find_module(session, modules, ip)
         end
         sstart = UInt(retrieve_section_start(session, ip-1))
@@ -359,7 +415,7 @@ module GlibcDyldModules
     Try to obtain a handle to this object's debug object (a second object that
     contains the separated-out debug information). This is done by searching
     following any .gnu_debuglink section that this object may contain.
-    
+
     References:
     https://access.redhat.com/documentation/en-US/Red_Hat_Enterprise_Linux/4/html/Debugging_with_gdb/separate-debug-files.html
     https://blogs.oracle.com/dbx/entry/gnu_debuglink_or_debugging_system
@@ -382,7 +438,7 @@ module GlibcDyldModules
       for path in [execdir, joinpath(execdir,".debug"),
                    # For /usr/lib/..., /usr/lib/debug/usr/lib/...
                    joinpath(globaldir, execdir[2:end])]
-         fp = joinpath(path, fname) 
+         fp = joinpath(path, fname)
          isfile(fp) || continue
          buf = open(read, fp)
          crc == crc32(buf) || continue
