@@ -11,7 +11,7 @@ xor %rdx, %rdx
 xrstor  UC_MCONTEXT_SIZE(%rdi)
 movq    UC_MCONTEXT_GREGS_RSP(%rdi), %rax # rax holds new stack pointer
 subq    $16, %rax
-movq    %rax, 56(%rdi)
+movq    %rax, UC_MCONTEXT_GREGS_RSP(%rdi)
 movq    UC_MCONTEXT_GREGS_RDI(%rdi), %rbx  # store new rdi on new stack
 movq    %rbx, 0(%rax)
 movq    UC_MCONTEXT_GREGS_RIP(%rdi), %rbx # store new rip on new stack

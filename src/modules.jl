@@ -168,7 +168,7 @@ find_eh_frame_hdr{T}(m::Module{T}) = (get(mod.ehfr).hdr_sec)::SectionRef(T)
 find_ehfr(mod::Module) = get(mod.ehfr)
 find_ehfr(h) = EhFrameRef(find_eh_frame_hdr(h), find_ehframes(h)[1])
 
-function update_shlibs(session, modules)
+function update_shlibs!(session, modules)
     return false
 end
 

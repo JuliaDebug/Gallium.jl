@@ -5,10 +5,14 @@
 .globl hooking_jl_jumpto
 hooking_jl_jumpto:
 nop
+# Restore FP and SSE state (RFBM = 0b11)
+movq $3, %rax
+xor %rdx, %rdx
+xrstor  UC_MCONTEXT_SIZE(%rcx)
 movq    UC_MCONTEXT_GREGS_RSP(%rcx), %rax # rax holds new stack pointer
 subq    $16, %rax
 movq    %rax, UC_MCONTEXT_GREGS_RSP(%rcx)
-movq    UC_MCONTEXT_GREGS_RCX(%rcx), %rbx # store new rcx on new stack
+movq    UC_MCONTEXT_GREGS_RCX(%rcx), %rbx  # store new rcx on new stack
 movq    %rbx, 0(%rax)
 movq    UC_MCONTEXT_GREGS_RIP(%rcx), %rbx # store new rip on new stack
 movq    %rbx, 8(%rax)
@@ -16,8 +20,9 @@ movq    %rbx, 8(%rax)
 movq     UC_MCONTEXT_GREGS_RAX(%rcx), %rax
 movq     UC_MCONTEXT_GREGS_RBX(%rcx), %rbx
 # restore rcx later
+movq     UC_MCONTEXT_GREGS_RCX(%rcx), %rcx
 movq     UC_MCONTEXT_GREGS_RDX(%rcx), %rdx
-movq     UC_MCONTEXT_GREGS_RDI(%rcx), %rdi
+movq     UC_MCONTEXT_GREGS_RDI(%rcx), %rsi
 movq     UC_MCONTEXT_GREGS_RSI(%rcx), %rsi
 movq     UC_MCONTEXT_GREGS_RBP(%rcx), %rbp
 # restore rsp later
