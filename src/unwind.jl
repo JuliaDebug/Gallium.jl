@@ -14,6 +14,7 @@ using ELF
 using MachO
 using COFF
 using Gallium: find_module, Module, load, make_fdetab, make_inverse_symtab
+import Gallium: symbolicate
 
 typealias CFICacheEntry Tuple{CallFrameInfo.RegStates,CallFrameInfo.CIE,UInt}
 type CFICache
@@ -164,7 +165,7 @@ Base.length(a::TransformedArray) = length(a.arr)
 Base.size(a::TransformedArray) = size(a.arr)
 Base.getindex(a::TransformedArray, idx) = a.func(a.arr[idx])
 
-symbolicate(modules, ip) = symbolicate(LocalSession(), modules, ip)
+symbolicate(modules, ip) = symbolicate(Gallium.LocalSession(), modules, ip)
 function symbolicate(session, modules, ip)
     base, mod = try
         find_module(session, modules, ip)
@@ -221,7 +222,7 @@ end
 
 function fetch_cfi_val_value(s, r, resolution, cfa_addr)
     if resolution.base == CallFrameInfo.RegCFA
-        return convert(UInt64, convert(UInt64,cfa_addr)%Int64 + resolution.offset)
+        return (convert(UInt64,cfa_addr)%Int64 + resolution.offset) % UInt64
     else
         return convert(UInt64, get_dwarf(r, Int(resolution.base))%Int64 + resolution.offset)
     end

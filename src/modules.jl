@@ -257,7 +257,7 @@ elseif is_linux()
         end
         # hooking is weird
         contains(fname, "hooking.so") &&
-            continue
+            return false
         h = readmeta(IOBuffer(open(Base.Mmap.mmap,fname)))
         if is_exe
             phs = ELF.ProgramHeaders(h)
@@ -265,9 +265,10 @@ elseif is_linux()
             base += phs[idx].p_vaddr
         end
         modules.modules[UInt64(base)] = GlibcDyldModules.mod_for_h(h, UInt64(base), fname)
+        return true
     end
 
-    function update_shlibs!(sesssion::LocalSession, modules)
+    function update_shlibs!(session::LocalSession, modules)
         dynamic_libraries = LibArray(0)
 
         @static if is_linux()
@@ -385,7 +386,8 @@ module GlibcDyldModules
   using ELF
   using Gallium
   using ObjFileBase
-  using Gallium: load, mapped_file, XPUnwindRef
+  using Gallium: load, mapped_file, XPUnwindRef, InverseSymtab, CIECache,
+    FDETab
   using DWARF.CallFrameInfo
   using DWARF.CallFrameInfo: EhFrameRef
   using ObjFileBase: mangle_sname, handle
@@ -466,7 +468,7 @@ module GlibcDyldModules
         Nullable{EhFrameRef}(EhFrameRef(eh_frame_hdr, eh_frame)),
         Nullable{XPUnwindRef}(), dh,
         Nullable{InverseSymtab}(),
-        Vector{Tuple{Int,UInt}}(),
+        Nullable{FDETab}(),
         Nullable{CIECache}(),
         Gallium.compute_mod_size(h), false)
   end
@@ -547,7 +549,7 @@ module Win64DyldModules
     using ELF
     using Gallium
     using ObjFileBase
-    using Gallium: load, mapped_file, make_fdetab, XPUnwindRef
+    using Gallium: load, mapped_file, make_fdetab, XPUnwindRef, InverseSymtab
     using DWARF.CallFrameInfo
     using DWARF.CallFrameInfo: EhFrameRef, CIECache
     using ..GlibcDyldModules
@@ -634,4 +636,26 @@ module Win64DyldModules
         end
         modules
     end
+end
+
+# Module to represent the linux kernel
+immutable LinuxKernelModule
+    # Kernel Symbol table
+    addrs::Vector{UInt64}
+    names::Vector{String}
+    function LinuxKernelModule()
+        addrs = UInt64[]
+        names = String[]
+        for line in eachline("/proc/kallsyms")
+            pieces = split(line,' ')
+            push!(addrs, parse(UInt64,pieces[1],16))
+            push!(names, pieces[3][1:end-1])
+        end
+        new(addrs, names)
+    end
+end
+
+function symbolicate(kern::LinuxKernelModule, ip)
+    id = searchsortedlast(kern.addrs, ip)
+    kern.names[id]
 end

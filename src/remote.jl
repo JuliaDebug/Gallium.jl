@@ -48,40 +48,26 @@ end
 function mapped_file
 end
 
-# Remapping
-immutable Remap
-    addr::RemotePtr{Void}
-    size::UInt64
-    data::Vector{UInt8}
+# Simple session to put some data at specific addresses
+immutable FakeMemorySession
+    memory_maps::Vector{Tuple{UInt64,Vector{UInt8}}}
 end
 
-immutable TransparentRemap{T}
-    inferior::T
-    remaps::Vector{Remap}
-end
-
-function load{T}(tr::TransparentRemap, ptr::RemotePtr{T})
-    sz = sizeof(T)
-    for remap in tr.remaps
-        if UInt(remap.addr) <= UInt(ptr) &&
-            UInt(ptr) + sz <= UInt(remap.addr) + remap.size
-            offs = UInt(ptr) - UInt(remap.addr)
-            return unsafe_load(Ptr{T}(pointer(remap.data)+offs))
+function load{T}(mem::FakeMemorySession, ptr::RemotePtr{T})
+    for (addr, data) in mem.memory_maps
+        if addr <= UInt64(ptr) <= addr + sizeof(data)
+            start = (UInt64(ptr)-addr)
+            return reinterpret(T,data[1+start:start+sizeof(T)])[]
         end
     end
-    unsafe_load(tr.inferior, ptr)
+    error("Address $ptr not found")
 end
 
-function write_mem{T}(tr::TransparentRemap, ptr::RemotePtr{T}, val::T)
-    sz = sizeof(T)
-    for remap in tr.remaps
-        if UInt(remap.addr) <= UInt(ptr) &&
-            UInt(ptr) + sz <= UInt(remap.addr) + remap.size
-            offs = UInt(ptr) - UInt(remap.addr)
-            unsafe_store!(Ptr{T}(pointer(remap.data)+offs), val)
-            return nothing
+function store!{T}(session::FakeMemorySession, ptr::RemotePtr{T}, val::T)
+    for (addr, data) in mem.memory_maps
+        if addr <= UInt64(ptr) <= addr + sizeof(data)
+            start = (UInt64(ptr)-addr)
+            data[1+start:start+sizeof(T)] = reinterpret(UInt8,[val])
         end
     end
-    write_mem(tr.inferior, ptr, val)
-    nothing
 end

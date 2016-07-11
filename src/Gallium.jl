@@ -267,14 +267,16 @@ module Gallium
     end
 
     global active_modules = LazyJITModules()
+    global allow_bad_unwind = true
     function rec_backtrace(callback, RC, session = LocalSession(), modules = active_modules, ip_only = false, cfi_cache = nothing; stacktop = true)
         callback(RC) || return
         while true
-            (ok, RC) =# try
+            (ok, RC) = try
                 Unwinder.unwind_step(session, modules, RC, cfi_cache; stacktop = stacktop, ip_only = ip_only)
-            #catch e # e.g. invalid memory access, invalid unwind info etc.
-            #    break
-            #end
+            catch e # e.g. invalid memory access, invalid unwind info etc.
+                allow_bad_unwind::Bool || rethrow(e)
+                break
+            end
             stacktop = false
             ok || break
             callback(RC) || break
@@ -372,6 +374,22 @@ module Gallium
                 not_found_cb(dbgs, vardie, name)
             end
         end
+    end
+
+    function make_base_stackframe(session, modules, theip; firstframe = false)
+        sstart, h = try
+            find_module(session, modules, theip)
+        catch # Unwind got it wrong, but still include at least one stack frame
+            return Base.StackFrame(Symbol("???"),Symbol("???"),0,
+                Nullable{LambdaInfo}(),true,false,theip)
+        end
+        dh = dhandle(h)
+        lip = compute_ip(dh, sstart, theip-(firstframe?0:1))
+        dbgs = debugsections(dh)
+        file, line, linetab = linetable_entry(dbgs, lip)
+        name = symbolicate(session, modules, theip-(firstframe?0:1))
+        Base.StackFrame(Symbol(name),Symbol(file),line,Nullable{LambdaInfo}(),
+            true, false, theip)
     end
 
     function linetable_entry(dbgs, lip)
