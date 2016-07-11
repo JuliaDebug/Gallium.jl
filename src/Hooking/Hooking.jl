@@ -449,7 +449,7 @@ end
 function hook(thehook::Hook)
     nbytes = length(thehook.orig_data)
     template = hook_asm_template();
-    hook_asm = [ template; zeros(UInt8,nbytes-length(template)) ]# Pad to nbytes
+    hook_asm = [ template; fill(0x90,nbytes-length(template)) ]# Pad to nbytes
 
     dest = unsafe_wrap(Array, convert(Ptr{UInt8}, thehook.addr),
         (nbytes,), false)

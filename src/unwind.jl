@@ -13,7 +13,7 @@ using ObjFileBase: Sections, mangle_sname
 using ELF
 using MachO
 using COFF
-using Gallium: find_module, Module, load
+using Gallium: find_module, Module, load, make_fdetab, make_inverse_symtab
 
 typealias CFICacheEntry Tuple{CallFrameInfo.RegStates,CallFrameInfo.CIE,UInt}
 type CFICache
@@ -33,7 +33,9 @@ function find_fde(mod, modrel)
     slide = 0
     eh_frame = Gallium.find_ehframes(mod)[1]
     if isa(mod, Module) && isnull(mod.ehfr)
-        return CallFrameInfo.search_fde_offset(eh_frame, mod.FDETab, modrel, slide)
+        isnull(mod.FDETab) &&
+            (mod.FDETab = Nullable(make_fdetab(mod.base, mod.handle)))
+        return CallFrameInfo.search_fde_offset(eh_frame, get(mod.FDETab), modrel, slide)
     else
         tab = Gallium.find_ehfr(mod)
         modrel = Int(modrel)-Int(sectionoffset(tab.hdr_sec))
@@ -64,7 +66,16 @@ function modulerel(mod, base, ip)
     ret = (ip - base)
 end
 
-realize_cie(mod::Module, fde) = realize_cie(mod.ciecache, fde)
+get_ciecache(_) = nothing
+function get_ciecache(mod::Module)
+    if isnull(mod.ciecache) && !isnull(mod.eh_frame)
+        CallFrameInfo.precompute(get(mod.eh_frame))
+    end
+    isnull(mod.ciecache) && return nothing
+    get(mod.ciecache)
+end
+
+realize_cie(mod::Module, fde) = realize_cie(get_ciecache(mod), fde)
 
 function compute_register_states(s, base, mod, r, stacktop, ::Void)
     modrel = UInt(modulerel(mod, base, UInt(ip(r))))
@@ -79,8 +90,7 @@ function compute_register_states(s, base, mod, r, stacktop, ::Void)
         end
         rethrow(e)
     end
-    ciecache = nothing
-    isa(mod, Module) && (ciecache = mod.ciecache)
+    ciecache = get_ciecache(mod)
     cie::CIE, ccoff = realize_cieoff(fde, ciecache)
     # Compute CFA
     target_delta::UInt64 = modrel - loc - (stacktop?0:1)
@@ -187,6 +197,8 @@ function symbolicate(session, modules, ip)
         (true, value)
     end
     if isa(mod, Gallium.Module)
+        isnull(mod.inverse_symtab) &&
+            (mod.inverse_symtab = Nullable(make_inverse_symtab(dhandle(mod))))
         idx = searchsortedfirst(TransformedArray(mod.inverse_symtab,
             idx->symbolvalue(syms[idx], sections)), loc)
         while idx <= length(syms)

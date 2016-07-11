@@ -4,13 +4,16 @@ using DWARF.CallFrameInfo: EhFrameRef, CIECache
 using ObjFileBase
 using ObjFileBase: handle, isrelocatable, Sections, mangle_sname
 
+const InverseSymtab = Vector{UInt32}
+const FDETab = Vector{Tuple{Int,UInt}}
 
 """
 Keeps a list of local modules, lazy loading those that it doesn't have from
 the current process's address space.
 """
-immutable Module{T<:ObjFileBase.ObjectHandle, SR<:ObjFileBase.SectionRef}
+type Module{T<:ObjFileBase.ObjectHandle, SR<:ObjFileBase.SectionRef}
     handle::T
+    base::UInt64
     # The .eh_frame section when unwinding using DWARF
     eh_frame::Nullable{SR}
     # Either a DWARF or SEH header/unwind table pair
@@ -21,9 +24,9 @@ immutable Module{T<:ObjFileBase.ObjectHandle, SR<:ObjFileBase.SectionRef}
     dwarfhandle::T
     # Keeps symbol table indices in ip order as opposed to alphabetically,
     # to accelerate symbol lookup by ip.
-    inverse_symtab::Vector{UInt32}
-    FDETab::Vector{Tuple{Int,UInt}}
-    ciecache::CIECache
+    inverse_symtab::Nullable{InverseSymtab}
+    FDETab::Nullable{FDETab}
+    ciecache::Nullable{CIECache}
     sz::UInt
     is_jit_dobj::Bool
 end
@@ -143,7 +146,7 @@ end
     function obtain_dsym(fname, objecth)
         dsympath = string(fname, ".dSYM/Contents/Resources/DWARF/", basename(fname))
         isfile(dsympath) || return objecth
-        debugh = readmeta(IOBuffer(open(read, dsympath)))
+        debugh = readmeta(IOBuffer(open(Base.Mmap.mmap, dsympath)))
         (obtain_uuid(objecth) != obtain_uuid(debugh)) && return debugh
         debugh
     end
@@ -172,42 +175,46 @@ function update_shlibs!(session, modules)
     return false
 end
 
-
 @static if is_apple()
+    function update_module!(session::LocalSession, modules, base, fname)
+        h = readmeta(IOBuffer(open(Base.Mmap.mmap, fname)))
+        if isa(h, MachO.FatMachOHandle)
+            h = h[findfirst(arch->arch.cputype == MachO.CPU_TYPE_X86_64, h.archs)]
+        end
+        # Do not record the dynamic linker in our module list
+        # Also skip the executable for now
+        ft = readheader(h).filetype
+        if ft == MachO.MH_DYLINKER
+            return false
+        end
+        # For now, don't record shared libraries for which we only
+        # have compact unwind info.
+        ehfs = find_ehframes(h)
+        length(collect(ehfs)) == 0 && return false
+        vmaddr = first_actual_segment(h).vmaddr
+        base += vmaddr
+        modules.modules[base] = Module(h, base, Nullable(ehfs[]),
+            Nullable{EhFrameRef}(),
+            Nullable{XPUnwindRef}(),
+            obtain_dsym(fname, h), Nullable{InverseSymtab}(),
+            Nullable{FDETab}(), Nullable{CIECache}(),
+            compute_mod_size(h), false)
+        return true
+    end
+
     function update_shlibs!(session::LocalSession, modules)
         nactuallibs = ccall(:_dyld_image_count, UInt32, ())
         if modules.nsharedlibs != nactuallibs
             for idx in (modules.nsharedlibs+1):nactuallibs
                 idx -= 1
                 base = ccall(:_dyld_get_image_vmaddr_slide, UInt, (UInt32,), idx)
+                haskey(modules.modules, UInt64(base)) && continue
                 fname = unsafe_string(
                     ccall(:_dyld_get_image_name, Ptr{UInt8}, (UInt32,), idx))
                 # hooking is weird
                 contains(fname, "hooking.dylib") &&
                     continue
-                h = readmeta(IOBuffer(open(read, fname)))
-                if isa(h, MachO.FatMachOHandle)
-                    h = h[findfirst(arch->arch.cputype == MachO.CPU_TYPE_X86_64, h.archs)]
-                end
-                # Do not record the dynamic linker in our module list
-                # Also skip the executable for now
-                ft = readheader(h).filetype
-                if ft == MachO.MH_DYLINKER
-                    continue
-                end
-                # For now, don't record shared libraries for which we only
-                # have compact unwind info.
-                ehfs = find_ehframes(h)
-                length(collect(ehfs)) == 0 && continue
-                fdetab = make_fdetab(base, h)
-                vmaddr = first_actual_segment(h).vmaddr
-                base += vmaddr
-                modules.modules[base] = Module(h, Nullable(ehfs[]),
-                    Nullable{EhFrameRef}(),
-                    Nullable{XPUnwindRef}(),
-                    obtain_dsym(fname, h), make_inverse_symtab(h),
-                    fdetab, CallFrameInfo.precompute(ehfs[]),
-                    compute_mod_size(h), false)
+                update_module!(session, modules, base, fname)
             end
             modules.nsharedlibs = nactuallibs
             return true
@@ -243,6 +250,23 @@ elseif is_linux()
         return convert(Cint, 0)::Cint
     end
 
+    function update_module!(session::LocalSession, modules, base, fname)
+        is_exe = isempty(fname)
+        if is_exe
+            fname = readlink("/proc/self/exe")
+        end
+        # hooking is weird
+        contains(fname, "hooking.so") &&
+            continue
+        h = readmeta(IOBuffer(open(Base.Mmap.mmap,fname)))
+        if is_exe
+            phs = ELF.ProgramHeaders(h)
+            idx = findfirst(p->p.p_offset==0&&p.p_type==ELF.PT_LOAD, phs)
+            base += phs[idx].p_vaddr
+        end
+        modules.modules[UInt64(base)] = GlibcDyldModules.mod_for_h(h, UInt64(base), fname)
+    end
+
     function update_shlibs!(sesssion::LocalSession, modules)
         dynamic_libraries = LibArray(0)
 
@@ -253,20 +277,8 @@ elseif is_linux()
         end
 
         for (fname,base) in dynamic_libraries[modules.nsharedlibs+1:end]
-            is_exe = isempty(fname)
-            if is_exe
-                fname = readlink("/proc/self/exe")
-            end
-            # hooking is weird
-            contains(fname, "hooking.so") &&
-                continue
-            h = readmeta(IOBuffer(open(read, fname)))
-            if is_exe
-                phs = ELF.ProgramHeaders(h)
-                idx = findfirst(p->p.p_offset==0&&p.p_type==ELF.PT_LOAD, phs)
-                base += phs[idx].p_vaddr
-            end
-            modules.modules[UInt64(base)] = GlibcDyldModules.mod_for_h(h, fname)
+            haskey(modules.modules, UInt64(base)) && continue
+            update_module!(session, modules, base, fname)
         end
 
         did_update = length(dynamic_libraries) > modules.nsharedlibs
@@ -298,10 +310,9 @@ function jit_mod_for_h(buf, h, sstart)
     end
     isa(h, MachO.MachOHandle) && isempty(fdetab) && (fdetab = make_fdetab(sstart, h))
     eh_frame = find_ehframes(h)[]
-    !isa(h, COFF.COFFHandle) && (ciecache = CallFrameInfo.precompute(eh_frame))
-    Module(h, Nullable(eh_frame),
-        ehfr, xpdata, h, make_inverse_symtab(h),
-        fdetab, ciecache, compute_mod_size(h), true)
+    Module(h, sstart, Nullable(eh_frame),
+        ehfr, xpdata, h, Nullable{InverseSymtab}(),
+        Nullable(fdetab), Nullable{CIECache}(), compute_mod_size(h), true)
 end
 
 function retrieve_obj_data(s::LocalSession, ip)
@@ -440,23 +451,23 @@ module GlibcDyldModules
                    joinpath(globaldir, execdir[2:end])]
          fp = joinpath(path, fname)
          isfile(fp) || continue
-         buf = open(read, fp)
+         buf = open(Base.Mmap.mmap, fp)
          crc == crc32(buf) || continue
          return readmeta(IOBuffer(buf))
       end
       return h
   end
 
-  function mod_for_h(h, filename)
+  function mod_for_h(h, base, filename)
       eh_frame = Gallium.find_ehframes(h)[]
       eh_frame_hdr = Gallium.find_eh_frame_hdr(h)
       dh = search_debug_object(h, filename)
-      Gallium.Module(h, Nullable(eh_frame),
+      Gallium.Module(h, base, Nullable(eh_frame),
         Nullable{EhFrameRef}(EhFrameRef(eh_frame_hdr, eh_frame)),
         Nullable{XPUnwindRef}(), dh,
-        Gallium.make_inverse_symtab(dh),
+        Nullable{InverseSymtab}(),
         Vector{Tuple{Int,UInt}}(),
-        CallFrameInfo.precompute(eh_frame),
+        Nullable{CIECache}(),
         Gallium.compute_mod_size(h), false)
   end
 
@@ -477,7 +488,7 @@ module GlibcDyldModules
     phs = ELF.ProgramHeaders(imageh)
     idx = findfirst(p->p.p_offset==0&&p.p_type==ELF.PT_LOAD, phs)
     imagebase = phs[idx].p_vaddr + image_slide
-    modules[RemotePtr{Void}(imagebase)] = mod_for_h(imageh, "")
+    modules[RemotePtr{Void}(imagebase)] = mod_for_h(imageh, imagebase, "")
 
     # Obtain the target address space's r_debug struct
     secs = collect(filter(x->sectionname(x)==".dynamic",ELF.Sections(imageh)))
@@ -514,9 +525,9 @@ module GlibcDyldModules
                     # Don't use the IOStream directly. We do a look of seeking/poking,
                     # so loading the whole thing into memory and using an IOBuffer is
                     # faster
-                    buf = IOBuffer(open(read, fn))
+                    buf = IOBuffer(open(Base.Mmap.mmap, fn))
                     h = readmeta(buf)
-                    modules[lm.l_addr] = mod_for_h(h, fn)
+                    modules[lm.l_addr] = mod_for_h(h, lm.l_addr, fn)
                 end
             end
         end
@@ -573,9 +584,9 @@ module Win64DyldModules
         sects = Sections(h)
         pdata = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"pdata"),sects))[]
         xdata = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"xdata"),sects))[]
-        Gallium.Module(h, Nullable{typeof(pdata)}(), Nullable{EhFrameRef}(),
+        Gallium.Module(h, dllbase, Nullable{typeof(pdata)}(), Nullable{EhFrameRef}(),
             Nullable{XPUnwindRef}(XPUnwindRef(xdata, pdata)), h,
-            Gallium.make_inverse_symtab(h),
+            Nullable{InverseSymtab}(),
             Vector{Tuple{Int,UInt}}(),
             CIECache(), Gallium.compute_mod_size(h), false)
     end
@@ -610,7 +621,7 @@ module Win64DyldModules
             fn = mapped_file(vm, entry.DllBase)
             isempty(fn) && (fn = mapped_file(vm, entry.DllBase + 0x1000))
             if !isempty(fn)
-                h = readmeta(IOBuffer(open(read, fn)))
+                h = readmeta(IOBuffer(open(Base.Mmap.mmap, fn)))
                 # If this is an ELF library, it is likely one of wine's internal
                 # fake DLLs, follow the Linux codepath instead
                 if isa(h, ELF.ELFHandle)
