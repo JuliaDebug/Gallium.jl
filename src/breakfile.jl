@@ -122,11 +122,16 @@ end
 
 function breakpoint(file::AbstractString, line::Int)
     bp = Breakpoint()
+    found = false
     for (fname, meths) in filemap
         contains(string(fname), file) || continue
+        found = true
         for meth in methods_for_line(meths, line)
             add_meth_to_bp!(bp, meth)
         end
+    end
+    if !found
+        warn("No file $file found in loaded packages or included files.")
     end
     unshift!(bp.sources, FileLineSource(bp, file, line))
     bp
