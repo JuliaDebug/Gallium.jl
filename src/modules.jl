@@ -258,6 +258,9 @@ elseif is_linux()
         # hooking is weird
         contains(fname, "hooking.so") &&
             return false
+        # linux-vdso is fake
+        contains(fname, "linux-vdso") &&
+            return false
         h = readmeta(IOBuffer(open(Base.Mmap.mmap,fname)))
         if is_exe
             phs = ELF.ProgramHeaders(h)
