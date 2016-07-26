@@ -199,17 +199,17 @@ function symbolicate(session, modules, ip)
     end
     if isa(mod, Gallium.Module)
         isnull(mod.inverse_symtab) &&
-            (mod.inverse_symtab = Nullable(make_inverse_symtab(dhandle(mod))))
-        idx = searchsortedfirst(TransformedArray(mod.inverse_symtab,
+            (mod.inverse_symtab = Nullable(make_inverse_symtab(Gallium.dhandle(mod))))
+        idx = searchsortedfirst(TransformedArray(get(mod.inverse_symtab),
             idx->symbolvalue(syms[idx], sections)), loc)
         while idx <= length(syms)
-            ok, value = correct_symbol(syms[mod.inverse_symtab[idx]])
+            ok, value = correct_symbol(syms[get(mod.inverse_symtab)[idx]])
             (mod.is_jit_dobj) && (value -= base)
             (ok && value == loc) && break
             ok && value > loc && (#=idx = 0;=# break)
             idx += 1
         end
-        idx != 0 && (idx = mod.inverse_symtab[idx])
+        idx != 0 && (idx = get(mod.inverse_symtab)[idx])
     else
         idx = findfirst(syms) do sym
             ok, value = correct_symbol(sym)

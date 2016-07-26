@@ -36,6 +36,14 @@ module X86_64
   )
   const inverse_seh = map(p->p[2]=>p[1], seh_numbering)
 
+  const kernel_order = [
+    [Symbol("r$r") for r in 15:-1:12]; :rbp; :rbx;
+    [Symbol("r$r") for r in 11:-1:8]; :rax; :rcx;
+    :rdx; :rsi; :rdi; :orig_rax; :rip; :cs; :eflags;
+    :rsp; :ss; :fs_base; :gs_base; :ds; :es; :fs; :gs
+  ]
+  const kernel_numbering = Dict(sym=>idx for (idx,sym) in enumerate(kernel_order))
+
   # This operation can be performance critical, precompute it.
   const dwarf2gdbmap = [inverse_gdb[dwarf_numbering[regno]] for regno in basic_regs]
   dwarf2gdb(regno) = dwarf2gdbmap[regno+1]

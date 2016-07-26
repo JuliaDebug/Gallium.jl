@@ -467,7 +467,7 @@ module GlibcDyldModules
       eh_frame = Gallium.find_ehframes(h)[]
       eh_frame_hdr = Gallium.find_eh_frame_hdr(h)
       dh = search_debug_object(h, filename)
-      Gallium.Module(h, base, Nullable(eh_frame),
+      Gallium.Module(h, UInt64(base), Nullable(eh_frame),
         Nullable{EhFrameRef}(EhFrameRef(eh_frame_hdr, eh_frame)),
         Nullable{XPUnwindRef}(), dh,
         Nullable{InverseSymtab}(),

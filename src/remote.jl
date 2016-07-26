@@ -71,3 +71,12 @@ function store!{T}(session::FakeMemorySession, ptr::RemotePtr{T}, val::T)
         end
     end
 end
+
+function getregs
+end
+
+function continue!
+end
+
+function single_step!
+end

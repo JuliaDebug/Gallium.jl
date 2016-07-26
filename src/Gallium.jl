@@ -20,6 +20,7 @@ module Gallium
     include("modules.jl")
     include("unwind.jl")
     include("Hooking/Hooking.jl")
+    include("ptrace.jl")
 
     using .Registers
     using .Registers: ip, get_dwarf
