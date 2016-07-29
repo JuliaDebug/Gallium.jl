@@ -19,6 +19,7 @@ function initial_sweep()
         mod = pop!(workqueue)
         for sym in names(mod, true)
             !isdefined(mod, sym) && continue
+            Base.isdeprecated(mod, sym) && continue
             x = getfield(mod, sym)
             if isa(x, Core.Module)
                 !(x in visited_modules) && push!(workqueue, x)
