@@ -17,12 +17,13 @@ module Ptrace
   end
   start(x::MapsIterator) = open(x.file)
   function next(x::MapsIterator, file)
-      parts = split(readline(file), ' ', keep = false)
+      line = readline(file)
+      parts = split(line, ' ', keep = false)
       range = UnitRange{UInt64}(parse.([UInt64],split(parts[1],'-'),16)...)
       # Our ranges are [,], kernel ones are [,)
       range = first(range):last(range)-1
       fname = length(parts) == 6 ? strip(parts[6]) : ""
-      ((range, fname), file)
+      ((range, fname, line), file)
   end
   done(x::MapsIterator, file) = eof(file)
   iteratorsize(::Type{MapsIterator}) = Base.SizeUnknown()
@@ -41,12 +42,16 @@ module Ptrace
     (res % Culong)
   end
 
+  function Gallium.read_exe(s::Session)
+      readmeta(IOBuffer(open(Base.Mmap.mmap, "/proc/$pid/exe")))
+  end
+
   function attach(pid)
     pid = convert(Cint, pid)
     ptrace(PTRACE_ATTACH, pid, C_NULL, C_NULL)
     sess = Session(pid, RawFD(
       ccall(:open, Cint, (Ptr{UInt8}, Cint), "/proc/$pid/mem", Base.JL_O_RDWR)))
-    imageh = readmeta(IOBuffer(open(Base.Mmap.mmap, "/proc/$pid/exe")))
+    imageh = Gallium.read_exe(sess)
     modules = Gallium.GlibcDyldModules.load_library_map(sess, imageh)
     sess, modules
   end

@@ -431,7 +431,8 @@ module Gallium
             if fromC
                 sstart, h = try
                     find_module(session, modules, theip)
-                catch # Unwind got it wrong, but still include at least one stack frame
+                catch err # Unwind got it wrong, but still include at least one stack frame
+                    allow_bad_unwind::Bool || rethrow(err)
                     push!(stack, CStackFrame(theip, file, line, declfile, declline, firstframe))
                     return false
                 end

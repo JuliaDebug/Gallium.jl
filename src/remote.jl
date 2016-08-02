@@ -48,6 +48,9 @@ end
 function mapped_file
 end
 
+function segment_base
+end
+
 # Simple session to put some data at specific addresses
 immutable FakeMemorySession
     memory_maps::Vector{Tuple{UInt64,Vector{UInt8}}}
@@ -79,4 +82,10 @@ function continue!
 end
 
 function single_step!
+end
+
+function step_until_bkpt!
+end
+
+function read_exe
 end

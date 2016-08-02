@@ -44,11 +44,11 @@ end
 ObjFileBase.handle(mod::Module) = mod.handle
 dhandle(mod::Module) = mod.dwarfhandle
 dhandle(h) = h
-type LazyJITModules
-    modules::Dict{UInt, Module}
+type LazyJITModules{T}
+    modules::T
     nsharedlibs::Int
 end
-LazyJITModules() = LazyJITModules(Dict{UInt, Any}(), 0)
+LazyJITModules() = LazyJITModules(Dict{RemotePtr{Void}, Any}(), 0)
 
 function first_actual_segment(h)
     deref(first(filter(x->isa(deref(x),MachO.segment_commands)&&(segname(x)!="__PAGEZERO"), LoadCmds(handle(h)))))
@@ -171,10 +171,6 @@ find_eh_frame_hdr{T}(m::Module{T}) = (get(mod.ehfr).hdr_sec)::SectionRef(T)
 find_ehfr(mod::Module) = get(mod.ehfr)
 find_ehfr(h) = EhFrameRef(find_eh_frame_hdr(h), find_ehframes(h)[1])
 
-function update_shlibs!(session, modules)
-    return false
-end
-
 @static if is_apple()
     function update_module!(session::LocalSession, modules, base, fname)
         h = readmeta(IOBuffer(open(Base.Mmap.mmap, fname)))
@@ -202,7 +198,7 @@ end
         return true
     end
 
-    function update_shlibs!(session::LocalSession, modules)
+    function update_shlibs!(session::LocalSession, modules::LazyJITModules)
         nactuallibs = ccall(:_dyld_image_count, UInt32, ())
         if modules.nsharedlibs != nactuallibs
             for idx in (modules.nsharedlibs+1):nactuallibs
@@ -222,7 +218,7 @@ end
         return false
     end
 elseif is_windows()
-    function update_shlibs!(modules)
+    function update_shlibs!(session, modules)
         return false
     end
 elseif is_linux()
@@ -267,11 +263,12 @@ elseif is_linux()
             idx = findfirst(p->p.p_offset==0&&p.p_type==ELF.PT_LOAD, phs)
             base += phs[idx].p_vaddr
         end
-        modules.modules[UInt64(base)] = GlibcDyldModules.mod_for_h(h, UInt64(base), fname)
+        base = RemotePtr{Void}(UInt64(base))
+        modules.modules[base] = GlibcDyldModules.mod_for_h(h, base, fname)
         return true
     end
 
-    function update_shlibs!(session::LocalSession, modules)
+    function update_shlibs!(session::LocalSession, modules::LazyJITModules)
         dynamic_libraries = LibArray(0)
 
         @static if is_linux()
@@ -292,6 +289,7 @@ elseif is_linux()
 end
 
 function jit_mod_for_h(buf, h, sstart)
+    sstart = UInt(sstart)
     fdetab = Vector{Tuple{Int,UInt}}()
     ehfr = Nullable{EhFrameRef}()
     xpdata = Nullable{XPUnwindRef}()
@@ -319,26 +317,28 @@ function jit_mod_for_h(buf, h, sstart)
         Nullable(fdetab), Nullable{CIECache}(), compute_mod_size(h), true)
 end
 
-function retrieve_obj_data(s::LocalSession, ip)
+function retrieve_obj_data(s::LocalSession, modules, ip)
     data = ccall(:jl_get_dobj_data, Any, (UInt,), ip)
     @assert data != nothing
     copy(data)
 end
-retrieve_section_start(s::LocalSession, ip) =
+retrieve_section_start(s::LocalSession, modules, ip) =
     ccall(:jl_get_section_start, UInt64, (UInt,), ip)
+update_shlibs!(session, modules::LazyJITModules) =
+    update_shlibs!(session, modules.modules)
 
 function find_module(session, modules::LazyJITModules, ip)
-    ret = _find_module(modules.modules, ip)
+    ret = _find_module(module_dict(session, modules), ip)
     return !isnull(ret) ? get(ret) : begin
         if update_shlibs!(session, modules)
             return find_module(session, modules, ip)
         end
-        sstart = UInt(retrieve_section_start(session, ip-1))
+        sstart = RemotePtr{Void}(UInt(retrieve_section_start(session, modules, ip-1)))
         sstart == 0 && error("ip 0x$(hex(UInt(ip),2sizeof(UInt))) not found")
-        buf = IOBuffer(retrieve_obj_data(session, ip), true, true)
+        buf = IOBuffer(retrieve_obj_data(session, modules, ip), true, true)
         h = readmeta(buf)
-        modules.modules[sstart] = jit_mod_for_h(buf, h, sstart)
-        Pair{UInt,Any}(sstart, modules.modules[sstart])
+        module_dict(modules)[sstart] = jit_mod_for_h(buf, h, sstart)
+        Pair{UInt,Any}(sstart, module_dict(session, modules)[sstart])
     end
 end
 find_module(modules, ip) = find_module(LocalSession(), modules, ip)
@@ -353,7 +353,7 @@ end
 
 module_dict(modules) = module_dict(LocalSession(), modules)
 module_dict(session, modules) = modules
-module_dict(session, modules::LazyJITModules) = modules.modules
+module_dict(session, modules::LazyJITModules) = module_dict(session, modules.modules)
 module_dict(session, modules::MultiASModules) =
     module_dict(session, modules.modules_by_as[current_asid(session)])
 
@@ -391,6 +391,7 @@ module GlibcDyldModules
   using ObjFileBase
   using Gallium: load, mapped_file, XPUnwindRef, InverseSymtab, CIECache,
     FDETab
+  import Gallium: update_shlibs!
   using DWARF.CallFrameInfo
   using DWARF.CallFrameInfo: EhFrameRef
   using ObjFileBase: mangle_sname, handle
@@ -476,6 +477,75 @@ module GlibcDyldModules
         Gallium.compute_mod_size(h), false)
   end
 
+  immutable GlibCRemoteModules
+     modules::Dict{RemotePtr{Void},Any}
+     dt_debug_addr_addr::RemotePtr{RemotePtr{r_debug}}
+  end
+  Gallium.module_dict(session, mods::GlibCRemoteModules) = mods.modules
+
+  function update_shlibs!(vm, modules::GlibCRemoteModules; current_ip = 0)
+      local debug_struct, last_link_map
+      #try
+          dt_debug_addr = RemotePtr{r_debug}(load(vm, modules.dt_debug_addr_addr))
+
+          if dt_debug_addr == 0
+              # Dynamic linker not yet set up, if we know the current ip, we can
+              # try get the library by looking at the memory mapping for this address
+              if current_ip != 0
+                  base = Gallium.segment_base(vm, current_ip)
+                  fn = mapped_file(vm, base)
+                  if !isempty(fn)
+                      # Don't use the IOStream directly. We do a look of seeking/poking,
+                      # so loading the whole thing into memory and using an IOBuffer is
+                      # faster
+                      buf = IOBuffer(open(Base.Mmap.mmap, fn))
+                      h = readmeta(buf)
+                      modules.modules[base] = mod_for_h(h, base, fn)
+                      return true
+                  end
+              end
+              return false
+          end
+          debug_struct = load(vm, dt_debug_addr)
+          last_link_map = load(vm, debug_struct.link_map)
+      #catch err
+      #      @show err
+    #      return
+      #end
+
+      # Now for the shared libraries. We traverse the linked list of modules
+      # in the dynamic linker's r_debug structure.
+      lm = last_link_map
+      did_update = false
+      while lm.l_next.ptr != 0
+          # Do not add to the module list if the name is empty. This is true for
+          # the main executable as well as the dynamic library loader
+          if !haskey(modules.modules, lm.l_addr) && load(vm, lm.l_name) != 0
+              # name = load(vm, lm.l_name, 255)
+              # idx = findfirst(name,0)
+              # idx == 0 ? length(name) : idx
+              # @show String(name[1:idx])
+              # @show lm.l_addr
+              # Some libraries (e.g. wine's fake windows libraries) show up with
+              # load address 0, ignore them
+              if lm.l_addr != 0
+                  fn = mapped_file(vm, lm.l_addr)
+                  if !isempty(fn)
+                      # Don't use the IOStream directly. We do a look of seeking/poking,
+                      # so loading the whole thing into memory and using an IOBuffer is
+                      # faster
+                      buf = IOBuffer(open(Base.Mmap.mmap, fn))
+                      h = readmeta(buf)
+                      modules.modules[lm.l_addr] = mod_for_h(h, lm.l_addr, fn)
+                      did_update = true
+                  end
+              end
+          end
+          lm = load(vm, lm.l_next)
+      end
+      return did_update
+  end
+
   """
     Load the shared library map from address space `vm`.
     `imageh` should be the ObjectHandle of the main executable and `auxv_data`
@@ -485,7 +555,7 @@ module GlibcDyldModules
     may set `image_slide` to the offset of the executable's load address from
     it's intended load address.
   """
-  function load_library_map(vm, imageh, image_slide = 0)
+  function load_library_map(vm, imageh, image_slide = 0; current_ip = 0)
     # Construct the actual module map
     modules = Dict{RemotePtr{Void},Any}()
 
@@ -503,41 +573,9 @@ module GlibcDyldModules
     dt_debug_idx = findfirst(i->dynamic[i]==ELF.DT_DEBUG, 1:2:length(dynamic))
 
     dynamic_load_addr = deref(dynamic_sec).sh_addr + image_slide
-
     dt_debug_addr_addr = RemotePtr{UInt64}(dynamic_load_addr + (2*dt_debug_idx-1)*sizeof(Ptr{Void}))
-    dt_debug_addr = RemotePtr{r_debug}(load(vm, dt_debug_addr_addr))
-
-    debug_struct = load(vm, dt_debug_addr)
-    last_link_map = load(vm, debug_struct.link_map)
-
-    # Now for the shared libraries. We traverse the linked list of modules
-    # in the dynamic linker's r_debug structure.
-    lm = last_link_map
-    while lm.l_next.ptr != 0
-        # Do not add to the module list if the name is empty. This is true for
-        # the main executable as well as the dynamic library loader
-        if load(vm, lm.l_name) != 0
-            # name = load(vm, lm.l_name, 255)
-            # idx = findfirst(name,0)
-            # idx == 0 ? length(name) : idx
-            # @show String(name[1:idx])
-            # @show lm.l_addr
-            # Some libraries (e.g. wine's fake windows libraries) show up with
-            # load address 0, ignore them
-            if lm.l_addr != 0
-                fn = mapped_file(vm, lm.l_addr)
-                if !isempty(fn)
-                    # Don't use the IOStream directly. We do a look of seeking/poking,
-                    # so loading the whole thing into memory and using an IOBuffer is
-                    # faster
-                    buf = IOBuffer(open(Base.Mmap.mmap, fn))
-                    h = readmeta(buf)
-                    modules[lm.l_addr] = mod_for_h(h, lm.l_addr, fn)
-                end
-            end
-        end
-        lm = load(vm, lm.l_next)
-    end
+    modules = GlibCRemoteModules(modules, dt_debug_addr_addr)
+    update_shlibs!(vm, modules; current_ip=current_ip)
 
     modules
   end
