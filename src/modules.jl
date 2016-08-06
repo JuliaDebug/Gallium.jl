@@ -189,12 +189,13 @@ find_ehfr(h) = EhFrameRef(find_eh_frame_hdr(h), find_ehframes(h)[1])
         length(collect(ehfs)) == 0 && return false
         vmaddr = first_actual_segment(h).vmaddr
         base += vmaddr
-        modules.modules[base] = Module(h, base, Nullable(ehfs[]),
-            Nullable{EhFrameRef}(),
-            Nullable{XPUnwindRef}(),
-            obtain_dsym(fname, h), Nullable{InverseSymtab}(),
-            Nullable{FDETab}(), Nullable{CIECache}(),
-            compute_mod_size(h), false)
+        modules.modules[RemotePtr{Void}(base)] =
+            Module(h, base, Nullable(ehfs[]),
+                Nullable{EhFrameRef}(),
+                Nullable{XPUnwindRef}(),
+                obtain_dsym(fname, h), Nullable{InverseSymtab}(),
+                Nullable{FDETab}(), Nullable{CIECache}(),
+                compute_mod_size(h), false)
         return true
     end
 
