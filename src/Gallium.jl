@@ -64,7 +64,7 @@ module Gallium
 
     ASTInterpreter.done!(stack::NativeStack) = nothing
 
-    function ASTInterpreter.print_frame(io, num, x::JuliaStackFrame)
+    function ASTInterpreter.print_frame(_, io, num, x::JuliaStackFrame)
         print(io, "[$num] ")
         linfo = x.linfo
         ASTInterpreter.print_linfo_desc(io, linfo)
@@ -81,8 +81,8 @@ module Gallium
             end
         end)
     end
-    ASTInterpreter.print_frame(io, num, x::NativeStack) =
-        ASTInterpreter.print_frame(io, num, x.stack[end])
+    ASTInterpreter.print_frame(_, io, num, x::NativeStack) =
+        ASTInterpreter.print_frame(_, io, num, x.stack[end])
 
     function ASTInterpreter.print_status(state, x::JuliaStackFrame; kwargs...)
         if x.line < 0
@@ -414,6 +414,137 @@ module Gallium
         end
         file, line, linetab
     end
+    
+    function frameinfo(RC, session, modules; rich_c = false, firstframe = false)
+        theip = reinterpret(Ptr{Void},UInt(ip(RC)))
+        ipinfo = get_ipinfo(session, theip)[end]
+        fromC = ipinfo.from_c
+        file = ""
+        line = 0
+        local declfile="", declline=0
+        if fromC
+            sstart, h = try
+                find_module(session, modules, theip)
+            catch err # Unwind got it wrong, but still include at least one stack frame
+                allow_bad_unwind::Bool || rethrow(err)
+                return false, Nullable(CStackFrame(theip, file, line, declfile, declline, firstframe))
+            end
+            if rich_c
+                dh = dhandle(h)
+                lip = compute_ip(dh, sstart, theip-(firstframe?0:1))
+                local dbgs=nothing, cu=nothing, sp=nothing
+
+                try
+                    dbgs = debugsections(dh)
+                    cu = DWARF.searchcuforip(dbgs, lip)
+                    sp = DWARF.searchspforip(cu, lip)
+                catch
+                end
+                if sp !== nothing
+                    file, line, linetab = linetable_entry(dbgs, lip)
+                    
+                    declfile = DWARF.extract_attribute(sp, DWARF.DW_AT_decl_file)
+                    declfile = isnull(declfile) ? "" : linetab.header.file_names[convert(UInt,get(declfile))].name
+                    declline = DWARF.extract_attribute(sp, DWARF.DW_AT_decl_line)
+                    declline = isnull(declline) ? 0 : convert(UInt, get(declline))
+                end
+            end
+            return (true, Nullable(CStackFrame(theip, file, line, declfile, declline, firstframe)))
+        else
+            sstart, h = find_module(session, modules, theip)
+            isnull(ipinfo.linfo) && return (false, Nullable{JuliaStackFrame}())
+            tlinfo = get(ipinfo.linfo)
+            env = ASTInterpreter.prepare_locals(tlinfo)
+            copy!(env.sparams, tlinfo.sparam_vals)
+            slottypes = tlinfo.slottypes
+            tlinfo = tlinfo.def.lambda_template
+            variables = Dict()
+            dbgs = debugsections(dhandle(h))
+            try
+                lip = UInt(theip)-sstart-1
+                if isrelocatable(handle(h))
+                    lip = UInt(theip)-1
+                end
+                
+                file, line, _ = linetable_entry(dbgs, lip)
+
+                # Process Subprogram to extract local variables
+                strtab = ObjFileBase.load_strtab(dbgs.debug_str)
+                vartypes = Dict{Symbol,Type}()
+                if slottypes === nothing
+                    for name in tlinfo.slotnames
+                        vartypes[name] = Any
+                    end
+                else
+                    for (name, ty) in zip(tlinfo.slotnames, slottypes)
+                        vartypes[name] = ty
+                    end
+                end
+                variables = Dict()
+                function found_cb(dbgs, vardie, getreg, name, val)
+                    haskey(vartypes, name) || return
+                    variables[name] = :found
+                    if isa(val, DWARF.Expressions.MemoryLocation)
+                        if isbits(vartypes[name])
+                            ptr = reinterpret(Ptr{Void}, val.i)
+                            if ptr != C_NULL && heap_validate(ptr)
+                                val = unsafe_load(reinterpret(Ptr{vartypes[name]},
+                                    ptr))
+                            else
+                                val = Nullable{vartypes[name]}()
+                            end
+                        else
+                            ptr = reinterpret(Ptr{Void}, val.i)
+                            if ptr == C_NULL
+                                val = Nullable{Ptr{vartypes[name]}}()
+                            elseif heap_validate(ptr)
+                                val = unsafe_pointer_to_objref(ptr)
+                            # This is a heuristic. Should update to check
+                            # whether the variable is declared as jl_value_t
+                            elseif Hooking.mem_validate(ptr, sizeof(Ptr{Void}))
+                                ptr2 = unsafe_load(Ptr{Ptr{Void}}(ptr))
+                                if ptr2 == C_NULL
+                                    val = Nullable{Ptr{vartypes[name]}}()
+                                elseif heap_validate(ptr2)
+                                    val = unsafe_pointer_to_objref(ptr2)
+                                end
+                            end
+                        end
+                        variables[name] = :available
+                    elseif isa(val, DWARF.Expressions.RegisterLocation)
+                        # The value will generally be in the low bits of the
+                        # register. This should give the appropriate value
+                        val = getreg(val.i)[]
+                        if !isbits(vartypes[name])
+                            if val == 0
+                                val = Nullable{vartypes[name]}()
+                            elseif heap_validate(val)
+                                val = unsafe_pointer_to_objref(Ptr{Void}(val))
+                            else
+                                return
+                            end
+                        else
+                            val = reinterpret(vartypes[name],[val])[]
+                        end
+                        variables[name] = :available
+                    end
+                    varidx = findfirst(tlinfo.slotnames, name)
+                    if varidx != 0
+                        env.locals[varidx] = Nullable{Any}(val)
+                    end
+                end
+                iterate_variables(RC,found_cb,(dbgs, vardie, name)->variables[name] = :found,dbgs,lip)
+            catch err
+                if !isa(err, ErrorException) || err.msg != "Not found"
+                    @show err
+                    Base.show_backtrace(STDOUT, catch_backtrace())
+                end
+            end
+            # process SP.variables here
+            #h = readmeta(IOBuffer(data))
+            return (true, Nullable(JuliaStackFrame(h, file, UInt(ip(RC)), sstart, line, get(ipinfo.linfo), variables, env)))
+        end
+    end
 
     function stackwalk(RC, session = LocalSession(), modules = active_modules;
             fromhook = false, rich_c = false, ip_only = false, collectRCs=false)
@@ -421,138 +552,11 @@ module Gallium
         RCs = Any[]
         firstframe = true
         (fromhook ? rec_backtrace_hook : rec_backtrace)(RC, session, modules, ip_only) do RC
-            collectRCs && push!(RCs, copy(RC))
-            theip = reinterpret(Ptr{Void},UInt(ip(RC)))
-            ipinfo = get_ipinfo(session, theip)[end]
-            fromC = ipinfo.from_c
-            file = ""
-            line = 0
-            local declfile="", declline=0
-            if fromC
-                sstart, h = try
-                    find_module(session, modules, theip)
-                catch err # Unwind got it wrong, but still include at least one stack frame
-                    allow_bad_unwind::Bool || rethrow(err)
-                    push!(stack, CStackFrame(theip, file, line, declfile, declline, firstframe))
-                    return false
-                end
-                if rich_c
-                    dh = dhandle(h)
-                    lip = compute_ip(dh, sstart, theip-(firstframe?0:1))
-                    local dbgs=nothing, cu=nothing, sp=nothing
-
-                    try
-                        dbgs = debugsections(dh)
-                        cu = DWARF.searchcuforip(dbgs, lip)
-                        sp = DWARF.searchspforip(cu, lip)
-                    catch
-                    end
-                    if sp !== nothing
-                        file, line, linetab = linetable_entry(dbgs, lip)
-                        
-                        declfile = DWARF.extract_attribute(sp, DWARF.DW_AT_decl_file)
-                        declfile = isnull(declfile) ? "" : linetab.header.file_names[convert(UInt,get(declfile))].name
-                        declline = DWARF.extract_attribute(sp, DWARF.DW_AT_decl_line)
-                        declline = isnull(declline) ? 0 : convert(UInt, get(declline))
-                    end
-                end
-                push!(stack, CStackFrame(theip, file, line, declfile, declline, firstframe))
-            else
-                sstart, h = find_module(session, modules, theip)
-                isnull(ipinfo.linfo) && return false
-                tlinfo = get(ipinfo.linfo)
-                env = ASTInterpreter.prepare_locals(tlinfo)
-                copy!(env.sparams, tlinfo.sparam_vals)
-                slottypes = tlinfo.slottypes
-                tlinfo = tlinfo.def.lambda_template
-                variables = Dict()
-                dbgs = debugsections(dhandle(h))
-                try
-                    lip = UInt(theip)-sstart-1
-                    if isrelocatable(handle(h))
-                        lip = UInt(theip)-1
-                    end
-                    
-                    file, line, _ = linetable_entry(dbgs, lip)
-
-                    # Process Subprogram to extract local variables
-                    strtab = ObjFileBase.load_strtab(dbgs.debug_str)
-                    vartypes = Dict{Symbol,Type}()
-                    if slottypes === nothing
-                        for name in tlinfo.slotnames
-                            vartypes[name] = Any
-                        end
-                    else
-                        for (name, ty) in zip(tlinfo.slotnames, slottypes)
-                            vartypes[name] = ty
-                        end
-                    end
-                    variables = Dict()
-                    function found_cb(dbgs, vardie, getreg, name, val)
-                        haskey(vartypes, name) || return
-                        variables[name] = :found
-                        if isa(val, DWARF.Expressions.MemoryLocation)
-                            if isbits(vartypes[name])
-                                ptr = reinterpret(Ptr{Void}, val.i)
-                                if ptr != C_NULL && heap_validate(ptr)
-                                    val = unsafe_load(reinterpret(Ptr{vartypes[name]},
-                                        ptr))
-                                else
-                                    val = Nullable{vartypes[name]}()
-                                end
-                            else
-                                ptr = reinterpret(Ptr{Void}, val.i)
-                                if ptr == C_NULL
-                                    val = Nullable{Ptr{vartypes[name]}}()
-                                elseif heap_validate(ptr)
-                                    val = unsafe_pointer_to_objref(ptr)
-                                # This is a heuristic. Should update to check
-                                # whether the variable is declared as jl_value_t
-                                elseif Hooking.mem_validate(ptr, sizeof(Ptr{Void}))
-                                    ptr2 = unsafe_load(Ptr{Ptr{Void}}(ptr))
-                                    if ptr2 == C_NULL
-                                        val = Nullable{Ptr{vartypes[name]}}()
-                                    elseif heap_validate(ptr2)
-                                        val = unsafe_pointer_to_objref(ptr2)
-                                    end
-                                end
-                            end
-                            variables[name] = :available
-                        elseif isa(val, DWARF.Expressions.RegisterLocation)
-                            # The value will generally be in the low bits of the
-                            # register. This should give the appropriate value
-                            val = getreg(val.i)[]
-                            if !isbits(vartypes[name])
-                                if val == 0
-                                    val = Nullable{vartypes[name]}()
-                                elseif heap_validate(val)
-                                    val = unsafe_pointer_to_objref(Ptr{Void}(val))
-                                else
-                                    return
-                                end
-                            else
-                                val = reinterpret(vartypes[name],[val])[]
-                            end
-                            variables[name] = :available
-                        end
-                        varidx = findfirst(tlinfo.slotnames, name)
-                        if varidx != 0
-                            env.locals[varidx] = Nullable{Any}(val)
-                        end
-                    end
-                    iterate_variables(RC,found_cb,(dbgs, vardie, name)->variables[name] = :found,dbgs,lip)
-                catch err
-                    if !isa(err, ErrorException) || err.msg != "Not found"
-                        @show err
-                        Base.show_backtrace(STDOUT, catch_backtrace())
-                    end
-                end
-                # process SP.variables here
-                #h = readmeta(IOBuffer(data))
-                push!(stack, JuliaStackFrame(h, file, UInt(ip(RC)), sstart, line, get(ipinfo.linfo), variables, env))
-            end
+            keep_walking, frame = frameinfo(RC, session, modules, rich_c = rich_c, firstframe = firstframe)
+            !isnull(frame) && (push!(stack, get(frame));
+                collectRCs && push!(RCs, RC))
             firstframe = false
-            return true
+            return keep_walking
         end
         (reverse!(stack), reverse!(RCs))
     end
