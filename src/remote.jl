@@ -22,7 +22,7 @@ end
 Base.:(==)(x::Integer,y::RemotePtr) = x == y.ptr
 Base.:(==)(x::RemotePtr,y::Integer) = x.ptr == y
 Base.:(==)(x::RemotePtr,y::RemotePtr) = x.ptr == y.ptr
-
+Base.isless(x::RemotePtr,y::RemotePtr) = isless(UInt64(x),UInt64(y))
 
 # TODO: It's not entirely clear that this distinction is needed or useful,
 # but it's present in RR, so is included in this abstract interface for

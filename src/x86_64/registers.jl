@@ -17,7 +17,7 @@ module X86_64
   49 => :rflags,
   50 => :es, 51 => :cs, 52 => :ss,
   53 => :ds, 54 => :fs, 55 => :gs,
-  58 => Symbol("fs.base"), 59 => Symbol("gs.base"),
+  58 => :fs_base, 59 => :gs_base,
   62 => :tr, 63 => :ldtr, 64 => :mxcsr, 65 => :fcw,
   66 => :fsw)
   const inverse_dwarf = map(p->p[2]=>p[1], dwarf_numbering)
@@ -26,7 +26,12 @@ module X86_64
 
   const gdb_numbering = Dict{Int, Symbol}(
      0 => :rax, 1 => :rbx, 2 => :rcx, 3 => :rdx,
-     4 => :rsi, Dict(i=>dwarf_numbering[i] for i in 5:16)...
+     4 => :rsi, Dict(i=>dwarf_numbering[i] for i in 5:16)...,
+    17 => :rflags, 18 => :cs, 19 => :ds, 20 => :es, 21 => :fs, 22 => :gs,
+    #Dict(23+i => Symbol("st$i") for i = 0:7)..., 
+    31 => :fctrl, 32 => :fstat, 33 => :ftag, 34 => :fiseg, :35 => :fioff,
+    36 => :foseg, 37 => :fooff, 38 => :fop,
+    Dict(39+i => Symbol("xmm$i") for i = 0:15)...
   )
   const inverse_gdb = map(p->p[2]=>p[1], gdb_numbering)
 
@@ -46,7 +51,8 @@ module X86_64
 
   # This operation can be performance critical, precompute it.
   const dwarf2gdbmap = [inverse_gdb[dwarf_numbering[regno]] for regno in basic_regs]
-  dwarf2gdb(regno) = dwarf2gdbmap[regno+1]
+  dwarf2gdb(regno) = regno in basic_regs ? dwarf2gdbmap[regno+1] :
+    inverse_gdb[dwarf_numbering[regno]]
 
   # Basic Register Set
   const RegT = RegisterValue{UInt64}
@@ -123,8 +129,11 @@ module X86_64
     end
   end
 
-
-
+  function Registers.get_syscallarg(regs, idx)
+        @assert 1 <= idx <= 6
+        get_dwarf(regs, [:rdi, :rsi, :rdx, :r10, :r8, :r9][idx])
+  end
+  
   const state_64_regs = [:rax, :rbx, :rcx, :rdx, :rdi, :rsi, :rbp, :rsp,
     (Symbol("r$i") for i = 8:15)..., :rip, #= :rflags, :cs, :fs, :gs =#]
   function BasicRegs(thread::MachO.thread_command)

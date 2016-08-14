@@ -34,6 +34,16 @@ Module(handle, eh_frame, eh_frame_hdr, dwarfhandle, FDETab, ciecache, sz) =
     Module{typeof(handle),typeof(eh_frame)}(handle, eh_frame, eh_frame_hdr,
         Nullable{XPUnwindRef}(), dwarfhandle, FDETab, ciecache, sz, false)
 
+"""
+A way to obtain new modules, e.g. dynamic libraries or jit modules
+"""
+abstract ModuleSource
+
+immutable ModuleSet
+    sources::Vector{ModuleSource}
+    modules::Dict{RemotePtr{Void},Module}
+end
+
 type MultiASModules{T}
     new_as_callback
     modules_by_as::Dict{T, Any}  # ASID => modules
@@ -103,7 +113,7 @@ compute_mod_size(m::Module) = UInt(m.sz)
 end
 
 function find_module(session, modules, ip)
-    ret = _find_module(modules, ip)
+    ret = _find_module(module_dict(modules), ip)
     isnull(ret) && error("ip 0x$(hex(UInt(ip),2sizeof(UInt))) not found")
     get(ret)
 end
@@ -163,8 +173,9 @@ end
 function find_ehframes{T}(m::Module{T})
     (get(m.eh_frame)::SectionRef(T),)
 end
+_find_eh_frame_hdr(h) = filter(x->sectionname(x)==mangle_sname(handle(h),"eh_frame_hdr"),Sections(handle(h)))
 function find_eh_frame_hdr(h)
-    first(filter(x->sectionname(x)==mangle_sname(handle(h),"eh_frame_hdr"),Sections(handle(h))))
+    first(_find_eh_frame_hdr(h))
 end
 find_eh_frame_hdr{T}(m::Module{T}) = (get(mod.ehfr).hdr_sec)::SectionRef(T)
 
@@ -327,6 +338,15 @@ retrieve_section_start(s::LocalSession, modules, ip) =
     ccall(:jl_get_section_start, UInt64, (UInt,), ip)
 update_shlibs!(session, modules::LazyJITModules) =
     update_shlibs!(session, modules.modules)
+update_shlibs!(session, modules::Dict) = false
+
+function update_shlibs!(session, modules::ModuleSet)
+    did_change = false
+    for source in modules.sources
+        did_change |= update_shlibs!(session, modules, source)
+    end
+    return did_change
+end
 
 function find_module(session, modules::LazyJITModules, ip)
     ret = _find_module(module_dict(session, modules), ip)
@@ -353,6 +373,7 @@ function find_module(session, modules::MultiASModules, ip)
 end
 
 module_dict(modules) = module_dict(LocalSession(), modules)
+module_dict(session, modules::ModuleSet) = modules.modules
 module_dict(session, modules) = modules
 module_dict(session, modules::LazyJITModules) = module_dict(session, modules.modules)
 module_dict(session, modules::MultiASModules) =
@@ -368,12 +389,12 @@ function lookup_syms(session, modules, name, n = typemax(UInt))
     ret = Any[]
     name = string(name)
     for (base, h) in module_dict(session, modules)
-      symtab = ELF.Symbols(handle(h))
-      strtab = StrTab(symtab)
-      idx = findfirst(x->ELF.symname(x, strtab = strtab)==name,symtab)
+      symtab = ObjFileBase.Symbols(handle(h))
+      strtab = ObjFileBase.StrTab(symtab)
+      idx = findfirst(x->ObjFileBase.symname(x, strtab = strtab)==name,symtab)
       if idx != 0
           sym = symtab[idx]
-          if ELF.isundef(sym)
+          if ObjFileBase.isundef(sym)
               continue
           end
           push!(ret,(h, base, sym))
@@ -391,7 +412,7 @@ module GlibcDyldModules
   using Gallium
   using ObjFileBase
   using Gallium: load, mapped_file, XPUnwindRef, InverseSymtab, CIECache,
-    FDETab
+    FDETab, ModuleSource, ModuleSet, module_dict
   import Gallium: update_shlibs!
   using DWARF.CallFrameInfo
   using DWARF.CallFrameInfo: EhFrameRef
@@ -467,27 +488,26 @@ module GlibcDyldModules
 
   function mod_for_h(h, base, filename)
       eh_frame = Gallium.find_ehframes(h)[]
-      eh_frame_hdr = Gallium.find_eh_frame_hdr(h)
+      eh_frame_hdrs = collect(Gallium._find_eh_frame_hdr(h))
+      ehfr = isempty(eh_frame_hdrs) ? Nullable{EhFrameRef}() :
+        Nullable{EhFrameRef}(EhFrameRef(eh_frame_hdrs[], eh_frame))
       dh = search_debug_object(h, filename)
       Gallium.Module(h, UInt64(base), Nullable(eh_frame),
-        Nullable{EhFrameRef}(EhFrameRef(eh_frame_hdr, eh_frame)),
-        Nullable{XPUnwindRef}(), dh,
+        ehfr, Nullable{XPUnwindRef}(), dh,
         Nullable{InverseSymtab}(),
         Nullable{FDETab}(),
         Nullable{CIECache}(),
         Gallium.compute_mod_size(h), false)
   end
 
-  immutable GlibCRemoteModules
-     modules::Dict{RemotePtr{Void},Any}
+  immutable GlibCRemoteSource <: ModuleSource
      dt_debug_addr_addr::RemotePtr{RemotePtr{r_debug}}
   end
-  Gallium.module_dict(session, mods::GlibCRemoteModules) = mods.modules
 
-  function update_shlibs!(vm, modules::GlibCRemoteModules; current_ip = 0)
+  function update_shlibs!(vm, modules, source::GlibCRemoteSource; current_ip = 0)
       local debug_struct, last_link_map
       #try
-          dt_debug_addr = RemotePtr{r_debug}(load(vm, modules.dt_debug_addr_addr))
+          dt_debug_addr = RemotePtr{r_debug}(load(vm, source.dt_debug_addr_addr))
 
           if dt_debug_addr == 0
               # Dynamic linker not yet set up, if we know the current ip, we can
@@ -501,7 +521,7 @@ module GlibcDyldModules
                       # faster
                       buf = IOBuffer(open(Base.Mmap.mmap, fn))
                       h = readmeta(buf)
-                      modules.modules[base] = mod_for_h(h, base, fn)
+                      module_dict(modules)[base] = mod_for_h(h, base, fn)
                       return true
                   end
               end
@@ -537,7 +557,7 @@ module GlibcDyldModules
                       # faster
                       buf = IOBuffer(open(Base.Mmap.mmap, fn))
                       h = readmeta(buf)
-                      modules.modules[lm.l_addr] = mod_for_h(h, lm.l_addr, fn)
+                      module_dict(modules)[lm.l_addr] = mod_for_h(h, lm.l_addr, fn)
                       did_update = true
                   end
               end
@@ -562,7 +582,9 @@ module GlibcDyldModules
 
     # First the main executable. To do so we need to find the image base.
     phs = ELF.ProgramHeaders(imageh)
-    idx = findfirst(p->p.p_offset==0&&p.p_type==ELF.PT_LOAD, phs)
+    # We want the first loaded segment that's executable
+    idx = findfirst(p->p.p_type==ELF.PT_LOAD &&
+                       ((p.p_flags & ELF.PF_X) != 0), phs)
     imagebase = phs[idx].p_vaddr + image_slide
     modules[RemotePtr{Void}(imagebase)] = mod_for_h(imageh, imagebase, "")
 
@@ -572,11 +594,13 @@ module GlibcDyldModules
     dynamic_sec = secs[]
     dynamic = reinterpret(UInt64,read(dynamic_sec))
     dt_debug_idx = findfirst(i->dynamic[i]==ELF.DT_DEBUG, 1:2:length(dynamic))
+    @assert dt_debug_idx != 0
 
     dynamic_load_addr = deref(dynamic_sec).sh_addr + image_slide
     dt_debug_addr_addr = RemotePtr{UInt64}(dynamic_load_addr + (2*dt_debug_idx-1)*sizeof(Ptr{Void}))
-    modules = GlibCRemoteModules(modules, dt_debug_addr_addr)
-    update_shlibs!(vm, modules; current_ip=current_ip)
+    source = GlibCRemoteSource(dt_debug_addr_addr)
+    modules = ModuleSet(ModuleSource[source], modules)
+    update_shlibs!(vm, modules, source; current_ip=current_ip)
 
     modules
   end
@@ -591,13 +615,19 @@ module Win64DyldModules
     using ELF
     using Gallium
     using ObjFileBase
-    using Gallium: load, mapped_file, make_fdetab, XPUnwindRef, InverseSymtab
+    using Gallium: load, mapped_file, make_fdetab, XPUnwindRef, InverseSymtab,
+        ModuleSource, ModuleSet, module_dict
+    import Gallium: update_shlibs!
     using DWARF.CallFrameInfo
     using DWARF.CallFrameInfo: EhFrameRef, CIECache
     using ..GlibcDyldModules
     import Base: start, next, done
 
-    function get_peb_addr
+    function get_peb_addr(vm)
+        # Get TEB
+        teb_ptr = Gallium.get_dwarf(Gallium.getregs(vm), :gs_base)
+        peb_ptr_ptr = RemotePtr{UInt64}(teb_ptr + 0x60)
+        load(vm, peb_ptr_ptr)
     end
 
     # See https://msdn.microsoft.com/en-us/library/windows/desktop/aa380518(v=vs.85).aspx
@@ -628,11 +658,11 @@ module Win64DyldModules
         sects = Sections(h)
         pdata = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"pdata"),sects))[]
         xdata = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"xdata"),sects))[]
-        Gallium.Module(h, dllbase, Nullable{typeof(pdata)}(), Nullable{EhFrameRef}(),
+        Gallium.Module(h, UInt64(dllbase), Nullable{typeof(pdata)}(), Nullable{EhFrameRef}(),
             Nullable{XPUnwindRef}(XPUnwindRef(xdata, pdata)), h,
             Nullable{InverseSymtab}(),
-            Vector{Tuple{Int,UInt}}(),
-            CIECache(), Gallium.compute_mod_size(h), false)
+            Nullable(Vector{Tuple{Int,UInt}}()),
+            Nullable(CIECache()), Gallium.compute_mod_size(h), false)
     end
 
     const PEB_LDR_DATA_OFFSET      = 3 * sizeof(UInt64)
@@ -646,7 +676,6 @@ module Win64DyldModules
 
     start(m::ModuleIterator) = load(m.vm, RemotePtr{RemotePtr{LDR_DATA_TABLE_ENTRY}}(m.head))
     function next(m::ModuleIterator, s::RemotePtr{LDR_DATA_TABLE_ENTRY})
-        @show s
         entry = load(m.vm, s-16)
         (entry, entry.Prev)
     end
@@ -654,11 +683,16 @@ module Win64DyldModules
         s == m.head || s == 0
     Base.iteratorsize(::Type{ModuleIterator}) = Base.SizeUnknown()
 
-    function load_library_map(vm)
-        modules = Dict{RemotePtr{Void},Any}()
+    immutable Win64RemoteSource <: ModuleSource
+    end
+    
+    function update_shlibs!(vm, modules, source::Win64RemoteSource)
+        did_change = false
         map(ModuleIterator(vm)) do entry
             entry.DllBase == 0 && return
-            @show entry.DllBase
+            (haskey(module_dict(modules), entry.DllBase) ||
+                haskey(module_dict(modules), entry.DllBase-0x20000)) &&
+                    return
             # If this is a Wine library, the first 0x1000 are dynamically
             # allocated to create space for the COFF header. Also try to
             # look 0x1000 bytes after to make sure to get the right file.
@@ -669,13 +703,20 @@ module Win64DyldModules
                 # If this is an ELF library, it is likely one of wine's internal
                 # fake DLLs, follow the Linux codepath instead
                 if isa(h, ELF.ELFHandle)
-                    modules[entry.DllBase-0x20000] =
-                        GlibcDyldModules.mod_for_h(h, fn)
+                    module_dict(modules)[entry.DllBase-0x20000] =
+                        GlibcDyldModules.mod_for_h(h, entry.DllBase, fn)
                 else
-                    modules[entry.DllBase] = mod_for_h(entry.DllBase, h)
+                    module_dict(modules)[entry.DllBase] = mod_for_h(entry.DllBase, h)
                 end
+                did_change = true
             end
         end
+        did_change
+    end
+
+    function load_library_map(vm)
+        modules = ModuleSet(ModuleSource[Win64RemoteSource()], Dict{RemotePtr{Void},Any}())
+        update_shlibs!(vm, modules)
         modules
     end
 end

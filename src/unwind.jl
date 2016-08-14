@@ -209,6 +209,7 @@ function symbolicate(session, modules, ip)
             ok && value > loc && (#=idx = 0;=# break)
             idx += 1
         end
+        (idx == length(get(mod.inverse_symtab))+1) && (idx = 0)
         idx != 0 && (idx = get(mod.inverse_symtab)[idx])
     else
         idx = findfirst(syms) do sym

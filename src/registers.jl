@@ -40,6 +40,9 @@ module Registers
 
   # RegisterSets should ideally support the following operations
   export invalidate_regs!, set_sp!, set_ip!, set_dwarf!, get_dwarf
+  
+  # This will be provided automatically
+  export get_syscallarg
 
   function ip end
   function invalidate_regs! end
@@ -47,6 +50,7 @@ module Registers
   function set_ip! end
   function set_dwarf! end
   function get_dwarf end
+  function get_syscallarg end
 
   # Convenience fallback
   function get_dwarf(RC, sym::Symbol)
