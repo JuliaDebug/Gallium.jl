@@ -413,25 +413,26 @@ module GlibcDyldModules
   using ObjFileBase
   using Gallium: load, mapped_file, XPUnwindRef, InverseSymtab, CIECache,
     FDETab, ModuleSource, ModuleSet, module_dict
+  using Gallium.Registers: intptr, getarch
   import Gallium: update_shlibs!
   using DWARF.CallFrameInfo
   using DWARF.CallFrameInfo: EhFrameRef
   using ObjFileBase: mangle_sname, handle
 
-  immutable link_map
-    l_addr::RemotePtr{Void}
-    l_name::RemotePtr{UInt8}
-    l_ld::RemotePtr{Void}
-    l_next::RemotePtr{link_map}
-    l_prev::RemotePtr{link_map}
+  immutable link_map{intptrT}
+    l_addr::RemotePtr{Void,intptrT}
+    l_name::RemotePtr{UInt8,intptrT}
+    l_ld::RemotePtr{Void,intptrT}
+    l_next::RemotePtr{link_map{intptrT},intptrT}
+    l_prev::RemotePtr{link_map{intptrT},intptrT}
   end
 
-  immutable r_debug
+  immutable r_debug{intptrT}
     r_version::Cint
-    link_map::RemotePtr{link_map}
-    r_brk::UInt64
+    link_map::RemotePtr{link_map{intptrT},intptrT}
+    r_brk::intptrT
     r_state::Cint
-    r_ldbase::RemotePtr{Void}
+    r_ldbase::RemotePtr{Void,intptrT}
   end
 
   """
@@ -439,8 +440,8 @@ module GlibcDyldModules
     this information to the specified entrypoint in the executable image, one
     can compute the slide of the executable image in memory.
   """
-  function compute_entry_ptr(auxv_data::Vector{UInt8})
-    auxv = reinterpret(UInt64, auxv_data)
+  function compute_entry_ptr(sess, auxv_data::Vector{UInt8})
+    auxv = reinterpret(intptr(getarch(sess)), auxv_data)
     entry_idx = findfirst(i->auxv[i] == ELF.AT_ENTRY, 1:2:length(auxv))
     @assert entry_idx != 0
     #  auxv_idx = 1+2(entry_idx-1), we want auxv_idx + 1 == entry_idx
@@ -501,14 +502,13 @@ module GlibcDyldModules
   end
 
   immutable GlibCRemoteSource <: ModuleSource
-     dt_debug_addr_addr::RemotePtr{RemotePtr{r_debug}}
+     dt_debug_addr_addr::RemotePtr
   end
 
   function update_shlibs!(vm, modules, source::GlibCRemoteSource; current_ip = 0)
       local debug_struct, last_link_map
       #try
-          dt_debug_addr = RemotePtr{r_debug}(load(vm, source.dt_debug_addr_addr))
-
+          dt_debug_addr = load(vm, source.dt_debug_addr_addr)
           if dt_debug_addr == 0
               # Dynamic linker not yet set up, if we know the current ip, we can
               # try get the library by looking at the memory mapping for this address
@@ -588,16 +588,19 @@ module GlibcDyldModules
     imagebase = phs[idx].p_vaddr + image_slide
     modules[RemotePtr{Void}(imagebase)] = mod_for_h(imageh, imagebase, "")
 
+    intptr_t = isa(imageh.file, ELF.ELF64.File) ? UInt64 : UInt32
+
     # Obtain the target address space's r_debug struct
     secs = collect(filter(x->sectionname(x)==".dynamic",ELF.Sections(imageh)))
-    isempty(secs) && (return modules)
+    isempty(secs) && (return ModuleSet(ModuleSource[], modules))
     dynamic_sec = secs[]
-    dynamic = reinterpret(UInt64,read(dynamic_sec))
+    dynamic = reinterpret(intptr_t,read(dynamic_sec))
     dt_debug_idx = findfirst(i->dynamic[i]==ELF.DT_DEBUG, 1:2:length(dynamic))
     @assert dt_debug_idx != 0
 
     dynamic_load_addr = deref(dynamic_sec).sh_addr + image_slide
-    dt_debug_addr_addr = RemotePtr{UInt64}(dynamic_load_addr + (2*dt_debug_idx-1)*sizeof(Ptr{Void}))
+    dt_debug_addr_addr = RemotePtr{RemotePtr{r_debug{intptr_t},intptr_t},intptr_t}(
+        dynamic_load_addr + (2*dt_debug_idx-1)*sizeof(intptr_t))
     source = GlibCRemoteSource(dt_debug_addr_addr)
     modules = ModuleSet(ModuleSource[source], modules)
     update_shlibs!(vm, modules, source; current_ip=current_ip)
@@ -608,9 +611,9 @@ module GlibcDyldModules
 end
 
 """
-Load the set of active modules from the Win64 dynamic linker
+Load the set of active modules from the Windows dynamic linker
 """
-module Win64DyldModules
+module WinDyldModules
     using COFF
     using ELF
     using Gallium
@@ -623,12 +626,25 @@ module Win64DyldModules
     using ..GlibcDyldModules
     import Base: start, next, done
 
-    function get_peb_addr(vm)
+    # Note: These are the wine implementations
+    function get_peb_addr(::Gallium.X86_64.X86_64Arch, vm)
         # Get TEB
         teb_ptr = Gallium.get_dwarf(Gallium.getregs(vm), :gs_base)
         peb_ptr_ptr = RemotePtr{UInt64}(teb_ptr + 0x60)
         load(vm, peb_ptr_ptr)
     end
+
+    function get_peb_addr(::Gallium.X86_32.X86_32Arch, vm)
+        # Get TEB
+        fs_segment = Gallium.get_dwarf(Gallium.getregs(vm), :fs)
+        ((fs_segment & 0x4) == 0) || error("TLS segemnt is in LDT, need to add support")
+        gdt_entry = fs_segment >> 3
+        teb_ptr = Gallium.get_thread_area_base(vm, gdt_entry)
+        peb_ptr_ptr = RemotePtr{UInt32}(teb_ptr + 0x30)
+        load(vm, peb_ptr_ptr)
+    end
+
+    get_peb_addr(vm) = get_peb_addr(Gallium.getarch(vm), vm)
 
     # See https://msdn.microsoft.com/en-us/library/windows/desktop/aa380518(v=vs.85).aspx
     immutable UNICODE_STRING
@@ -638,20 +654,20 @@ module Win64DyldModules
     end
 
     # See https://msdn.microsoft.com/en-us/library/windows/desktop/aa813706(v=vs.85).aspx
-    immutable LDR_DATA_TABLE_ENTRY
-        Reserved::NTuple{2,RemotePtr{Void}}
-        Prev::RemotePtr{LDR_DATA_TABLE_ENTRY}
-        Next::RemotePtr{LDR_DATA_TABLE_ENTRY}
-        Reserved2::NTuple{2,RemotePtr{Void}}
-        DllBase::RemotePtr{Void}
-        EntryPoint::RemotePtr{Void}
-        Reserved3::RemotePtr{Void}
+    immutable LDR_DATA_TABLE_ENTRY{ptrT}
+        Reserved::NTuple{2,RemotePtr{Void,ptrT}}
+        Prev::RemotePtr{LDR_DATA_TABLE_ENTRY{ptrT},ptrT}
+        Next::RemotePtr{LDR_DATA_TABLE_ENTRY{ptrT},ptrT}
+        Reserved2::NTuple{2,RemotePtr{Void,ptrT}}
+        DllBase::RemotePtr{Void,ptrT}
+        EntryPoint::RemotePtr{Void,ptrT}
+        Reserved3::RemotePtr{Void,ptrT}
         FullDllName::UNICODE_STRING
     end
 
     immutable ModuleIterator
         vm
-        head::RemotePtr{LDR_DATA_TABLE_ENTRY}
+        head::RemotePtr
     end
 
     function mod_for_h(dllbase, h)
@@ -665,45 +681,61 @@ module Win64DyldModules
             Nullable(CIECache()), Gallium.compute_mod_size(h), false)
     end
 
-    const PEB_LDR_DATA_OFFSET      = 3 * sizeof(UInt64)
-    const InMemoryOrderList_OFFSET = 4 * sizeof(UInt64)
+    const PEB_LDR_DATA_IDX      = 3
+    InMemoryOrderList_OFFSET(ptrT) = 8 + 3*sizeof(ptrT)
     function ModuleIterator(vm)
         addr = get_peb_addr(vm)
-        peb_ldr_data_addr = load(vm, RemotePtr{UInt64}(addr + PEB_LDR_DATA_OFFSET))
-        head = peb_ldr_data_addr + InMemoryOrderList_OFFSET
-        ModuleIterator(vm, RemotePtr{LDR_DATA_TABLE_ENTRY}(head))
+        ptrT = Gallium.intptr(Gallium.getarch(vm))
+        peb_ldr_data_addr = load(vm,
+            RemotePtr{ptrT}(addr + PEB_LDR_DATA_IDX*sizeof(ptrT)))
+        head = peb_ldr_data_addr + InMemoryOrderList_OFFSET(ptrT)
+        ModuleIterator(vm, RemotePtr{LDR_DATA_TABLE_ENTRY{ptrT},ptrT}(head))
     end
 
-    start(m::ModuleIterator) = load(m.vm, RemotePtr{RemotePtr{LDR_DATA_TABLE_ENTRY}}(m.head))
-    function next(m::ModuleIterator, s::RemotePtr{LDR_DATA_TABLE_ENTRY})
-        entry = load(m.vm, s-16)
+    function start(m::ModuleIterator)
+        ptrT = typeof(m.head).parameters[2]
+        load(m.vm, RemotePtr{RemotePtr{LDR_DATA_TABLE_ENTRY{ptrT},ptrT},ptrT}(m.head))
+    end
+    function next{T}(m::ModuleIterator, s::RemotePtr{LDR_DATA_TABLE_ENTRY{T}})
+        entry = load(m.vm, s-2*sizeof(T))
         (entry, entry.Prev)
     end
-    done(m::ModuleIterator, s::RemotePtr{LDR_DATA_TABLE_ENTRY}) =
+    done{T}(m::ModuleIterator, s::RemotePtr{LDR_DATA_TABLE_ENTRY{T}}) =
         s == m.head || s == 0
     Base.iteratorsize(::Type{ModuleIterator}) = Base.SizeUnknown()
 
-    immutable Win64RemoteSource <: ModuleSource
+    immutable WinRemoteSource <: ModuleSource
     end
-    
-    function update_shlibs!(vm, modules, source::Win64RemoteSource)
+
+    function update_shlibs!(vm, modules, source::WinRemoteSource)
         did_change = false
         map(ModuleIterator(vm)) do entry
             entry.DllBase == 0 && return
-            (haskey(module_dict(modules), entry.DllBase) ||
-                haskey(module_dict(modules), entry.DllBase-0x20000)) &&
-                    return
+            haskey(module_dict(modules), entry.DllBase) && return
             # If this is a Wine library, the first 0x1000 are dynamically
             # allocated to create space for the COFF header. Also try to
             # look 0x1000 bytes after to make sure to get the right file.
             fn = mapped_file(vm, entry.DllBase)
-            isempty(fn) && (fn = mapped_file(vm, entry.DllBase + 0x1000))
+            if isempty(fn)
+                fn = mapped_file(vm, entry.DllBase + 0x1000)
+                if !isempty(fn)
+                    base = Gallium.segment_base(vm, entry.DllBase-0x1000)
+                    haskey(module_dict(modules), base) && return
+                end
+            end
             if !isempty(fn)
                 h = readmeta(IOBuffer(open(Base.Mmap.mmap, fn)))
                 # If this is an ELF library, it is likely one of wine's internal
                 # fake DLLs, follow the Linux codepath instead
                 if isa(h, ELF.ELFHandle)
-                    module_dict(modules)[entry.DllBase-0x20000] =
+                    # We need to find the actual ELF base address for this library
+                    # Wine rounds the location of the PE header up to the nearset
+                    # 64K. We can't reverse that computiation, we we try to look
+                    # at the base address of the previous page and hope that nobody
+                    # messsed with the memory layout.
+                    base = Gallium.segment_base(vm, entry.DllBase-0x1000)
+                    haskey(module_dict(modules), base) && return
+                    module_dict(modules)[base] =
                         GlibcDyldModules.mod_for_h(h, entry.DllBase, fn)
                 else
                     module_dict(modules)[entry.DllBase] = mod_for_h(entry.DllBase, h)
@@ -715,7 +747,7 @@ module Win64DyldModules
     end
 
     function load_library_map(vm)
-        modules = ModuleSet(ModuleSource[Win64RemoteSource()], Dict{RemotePtr{Void},Any}())
+        modules = ModuleSet(ModuleSource[WinRemoteSource()], Dict{RemotePtr{Void},Any}())
         update_shlibs!(vm, modules)
         modules
     end

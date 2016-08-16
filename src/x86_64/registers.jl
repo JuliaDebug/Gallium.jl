@@ -4,6 +4,10 @@ module X86_64
   using MachO
   import Base: copy
 
+  immutable X86_64Arch <: Registers.Architecture
+  end
+  Registers.intptr(::X86_64Arch) = UInt64
+
   # See http://www.x86-64.org/documentation/abi-0.99.7.pdf
   const dwarf_numbering = Dict{Int, Symbol}(
   0  => :rax,   1  => :rdx,   2  => :rcx,
@@ -28,8 +32,8 @@ module X86_64
      0 => :rax, 1 => :rbx, 2 => :rcx, 3 => :rdx,
      4 => :rsi, Dict(i=>dwarf_numbering[i] for i in 5:16)...,
     17 => :rflags, 18 => :cs, 19 => :ds, 20 => :es, 21 => :fs, 22 => :gs,
-    #Dict(23+i => Symbol("st$i") for i = 0:7)..., 
-    31 => :fctrl, 32 => :fstat, 33 => :ftag, 34 => :fiseg, :35 => :fioff,
+    #Dict(23+i => Symbol("st$i") for i = 0:7)...,
+    31 => :fctrl, 32 => :fstat, 33 => :ftag, 34 => :fiseg, 35 => :fioff,
     36 => :foseg, 37 => :fooff, 38 => :fop,
     Dict(39+i => Symbol("xmm$i") for i = 0:15)...
   )
@@ -67,6 +71,7 @@ module X86_64
       basic::BasicRegs
       xsave_state::NTuple{832, UInt8}
   end
+  Registers.getarch(::Union{BasicRegs,ExtendedRegs}) = X86_64Arch()
 
   import ..Registers: ip, set_ip!, set_sp!, invalidate_regs!
 
@@ -129,11 +134,19 @@ module X86_64
     end
   end
 
-  function Registers.get_syscallarg(regs, idx)
-        @assert 1 <= idx <= 6
-        get_dwarf(regs, [:rdi, :rsi, :rdx, :r10, :r8, :r9][idx])
+  function Registers.get_dwarf(::X86_64Arch, regs, sym)
+    get_dwarf(regs, inverse_dwarf[sym])
   end
-  
+
+  function Registers.set_dwarf!(::X86_64Arch, RC, sym, val)
+    set_dwarf!(RC, inverse_dwarf[sym], val)
+  end
+
+  function Registers.get_syscallarg(::X86_64Arch, regs, idx)
+    @assert 1 <= idx <= 6
+    get_dwarf(regs, [:rdi, :rsi, :rdx, :r10, :r8, :r9][idx])
+  end
+
   const state_64_regs = [:rax, :rbx, :rcx, :rdx, :rdi, :rsi, :rbp, :rsp,
     (Symbol("r$i") for i = 8:15)..., :rip, #= :rflags, :cs, :fs, :gs =#]
   function BasicRegs(thread::MachO.thread_command)

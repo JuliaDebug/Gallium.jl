@@ -26,9 +26,9 @@ CFICache(sz::Int) = CFICache(sz, Dict{RemotePtr{Void}, Tuple{CallFrameInfo.RegSt
 
 function get_word(s::Gallium.LocalSession, ptr::RemotePtr)
     Gallium.Hooking.mem_validate(UInt(ptr), sizeof(Ptr{Void})) || error("Invalid load")
-    load(s, RemotePtr{UInt64}(ptr))
+    UInt64(load(s, RemotePtr{Gallium.intptr(Gallium.getarch(s))}(ptr)))
 end
-get_word(s, ptr::RemotePtr) = load(s, RemotePtr{UInt64}(ptr))
+get_word(s, ptr::RemotePtr) = UInt64(load(s, RemotePtr{Gallium.intptr(Gallium.getarch(s))}(ptr)))
 
 function find_fde(mod, modrel)
     slide = 0
@@ -40,7 +40,7 @@ function find_fde(mod, modrel)
     else
         tab = Gallium.find_ehfr(mod)
         modrel = Int(modrel)-Int(sectionoffset(tab.hdr_sec))
-        slide = sectionoffset(tab.hdr_sec) - sectionoffset(eh_frame)
+        slide = Int(sectionoffset(tab.hdr_sec)) - Int(sectionoffset(eh_frame))
         loc, fde = CallFrameInfo.search_fde_offset(eh_frame, tab, modrel, slide)
         loc = loc + Int(sectionoffset(tab.hdr_sec))
         return (loc, fde)
@@ -242,7 +242,7 @@ function fetch_cfi_value(s, r, rs, reg, cfa_addr)
         return fetch_cfi_val_value(s, r, resolution, cfa_addr)
     elseif resolution.flag == CallFrameInfo.Flag.Deref
         new_resolution = CallFrameInfo.RegState(resolution.base, resolution.offset, CallFrameInfo.Flag.Val)
-        addr = RemotePtr{Ptr{Void}}(fetch_cfi_val_value(s, r, new_resolution, cfa_addr))
+        addr = RemotePtr{Void}(fetch_cfi_val_value(s, r, new_resolution, cfa_addr))
         return get_word(s, addr)
     else
         error("Unknown resolution $resolution")

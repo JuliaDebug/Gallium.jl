@@ -8,16 +8,18 @@ Represents a debugging session with potentially one or more inferiors (e.g.
 abstract RemoteSession
 immutable LocalSession; end
 
-immutable RemotePtr{T}
-    ptr::UInt64
+immutable RemotePtr{T,intptrT}
+    ptr::intptrT
 end
+(::Type{RemotePtr{T}}){T}(arg) = RemotePtr{T,UInt64}(arg)
+(::Type{T}){T<:RemotePtr}(x::RemotePtr) = T(x.ptr)
 Base.convert(::Type{UInt64}, x::RemotePtr{UInt64}) = UInt64(x.ptr)
 Base.convert(::Type{UInt64}, x::RemotePtr) = UInt64(x.ptr)
-Base.convert{T<:RemotePtr}(::Type{T}, x::RemotePtr) = T(x.ptr)
-(::Type{RemotePtr{T}}){T}(x::RemotePtr) = RemotePtr{T}(x.ptr)
+Base.convert{T<:RemotePtr}(::Type{T}, x::RemotePtr) =
+    ((T === RemotePtr) ? x : T(x.ptr))::T
 for f in (:+, :-)
-    @eval ($f){T}(ptr::RemotePtr{T},i::Integer) = RemotePtr{T}(($f)(ptr.ptr,i))
-    @eval ($f){T}(i::Integer,ptr::RemotePtr{T}) = RemotePtr{T}(($f)(i,ptr.ptr))
+    @eval ($f){T<:RemotePtr}(ptr::T,i::Integer) = T(($f)(ptr.ptr,i))
+    @eval ($f){T<:RemotePtr}(i::Integer,ptr::T) = T(($f)(i,ptr.ptr))
 end
 Base.:(==)(x::Integer,y::RemotePtr) = x == y.ptr
 Base.:(==)(x::RemotePtr,y::Integer) = x.ptr == y
@@ -31,7 +33,8 @@ immutable RemoteCodePtr
     ptr::UInt64
 end
 Base.convert(::Type{UInt64},x::RemoteCodePtr) = x.ptr
-Base.convert(::Type{RemotePtr{Void}},x::RemoteCodePtr) = RemotePtr{Void}(x.ptr)
+Base.convert{T}(::Type{RemotePtr{Void,T}},x::RemoteCodePtr) = RemotePtr{Void,T}(x.ptr)
+Base.convert{T}(::Type{RemotePtr{T}},x::RemoteCodePtr) = RemotePtr{T}(x.ptr)
 Base.convert(::Type{RemotePtr},x::RemoteCodePtr) = RemotePtr{Void}(x.ptr)
 
 function load{T}(session::LocalSession, ptr::RemotePtr{T})
@@ -75,7 +78,14 @@ function store!{T}(session::FakeMemorySession, ptr::RemotePtr{T}, val::T)
     end
 end
 
+function getarch(s::LocalSession)
+    sizeof(Ptr{Void}) == 8 ? X86_64.X86_64Arch() : X86_64.X86_32Arch()
+end
+
 function getregs
+end
+
+function get_thread_area_base
 end
 
 function continue!

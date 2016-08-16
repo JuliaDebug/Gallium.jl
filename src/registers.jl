@@ -5,6 +5,8 @@ module Registers
   abstract RegisterSet
   import Base: convert, getindex, -, +
 
+  abstract Architecture
+
   """
   Represents the value of a machine register.
 
@@ -37,9 +39,12 @@ module Registers
                            :yellow, io, string(c))
       end
   end
+  
+  import Gallium: getarch
 
   # RegisterSets should ideally support the following operations
-  export invalidate_regs!, set_sp!, set_ip!, set_dwarf!, get_dwarf
+  export invalidate_regs!, set_sp!, set_ip!, set_dwarf!, get_dwarf,
+    getarch, intptr
   
   # This will be provided automatically
   export get_syscallarg
@@ -50,15 +55,19 @@ module Registers
   function set_ip! end
   function set_dwarf! end
   function get_dwarf end
-  function get_syscallarg end
+  function intptr end
+
+  function get_syscallarg(regs, idx)
+     get_syscallarg(getarch(regs), regs, idx)
+  end
 
   # Convenience fallback
   function get_dwarf(RC, sym::Symbol)
-     get_dwarf(RC, Gallium.X86_64.inverse_dwarf[sym]) 
+     get_dwarf(getarch(RC), RC, sym)
   end
 
   function set_dwarf!(RC, sym::Symbol, val)
-     set_dwarf!(RC, Gallium.X86_64.inverse_dwarf[sym], val)
+     set_dwarf!(getarch(RC), RC, sym, val)
   end
 
 end

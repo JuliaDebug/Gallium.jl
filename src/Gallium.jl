@@ -16,6 +16,7 @@ module Gallium
     include("remote.jl")
     include("registers.jl")
     include("x86_64/registers.jl")
+    include("x86_32/registers.jl")
     include("win64seh.jl")
     include("modules.jl")
     include("unwind.jl")
@@ -119,13 +120,15 @@ module Gallium
         loc, fde = Unwinder.find_fde(mod, modrel)
         cie = realize_cie(fde)
         target_delta = modrel - loc - 1
-        out = IOContext(STDOUT, :reg_map => Gallium.X86_64.dwarf_numbering)
+        out = IOContext(STDOUT, :reg_map =>
+            isa(Gallium.getarch(state.top_interp.session),Gallium.X86_64.X86_64Arch) ?
+            Gallium.X86_64.dwarf_numbering : Gallium.X86_32.dwarf_numbering)
         drs = CallFrameInfo.RegStates()
         CallFrameInfo.dump_program(out, cie, target = UInt(target_delta), rs = drs); println(out)
         CallFrameInfo.dump_program(out, fde, cie = cie, target = UInt(target_delta), rs = drs)
         return false
     end
-    
+
     function obtain_linetable(state, stack)
         mod, base, ip = modbaseip_for_stack(state, stack)
         dbgs = debugsections(dhandle(mod))
@@ -135,7 +138,16 @@ module Gallium
         seek(dbgs.debug_line, UInt(line_offset.value))
         DWARF.LineTableSupport.LineTable(handle(dbgs).io), lip
     end
-    
+
+    function ASTInterpreter.execute_command(state, stack::GalliumFrame, ::Val{:lip}, command)
+        mod, base, ip = modbaseip_for_stack(state, stack)
+        dbgs = debugsections(dhandle(mod))
+        lip = compute_ip(dhandle(mod), base, ip)
+        show(STDOUT, lip); println(STDOUT)
+        return false
+    end
+
+
     function ASTInterpreter.execute_command(state, stack::GalliumFrame, ::Union{Val{:linetabprog}, Val{:linetab}}, command)
         linetab = obtain_linetable(state, stack)[1]
         (command == Val{:linetabprog} ? DWARF.LineTableSupport.dump_program :
@@ -169,10 +181,24 @@ module Gallium
             phs = ELF.ProgramHeaders(handle)
             idx = findfirst(p->p.p_offset==0&&p.p_type==ELF.PT_LOAD, phs)
             UInt(theip + (phs[idx].p_vaddr - base))
+        elseif isa(handle, COFF.COFFHandle)
+            # Map from loaded address to file address
+            UInt(theip) + (Int(COFF.readoptheader(handle).windows.ImageBase) - Int(base))
         elseif ObjFileBase.isrelocatable(handle)
             UInt(theip)
         else
             UInt(theip - base)
+        end
+    end
+
+    function compute_symbol_value(handle, base, symbol)
+        if isa(handle, COFF.COFFHandle)
+            value = COFF.symbolvalue(symbol, COFF.Sections(ObjFileBase.handle(handle)))
+            # Map from file address to loaded address
+            return UInt(value) + (Int(base) - Int(COFF.readoptheader(h).windows.ImageBase))
+        else
+            value = ObjFileBase.symbolvalue(symbol, ObjFileBase.Sections(ObjFileBase.handle(handle)))
+            return base + value
         end
     end
 
@@ -268,7 +294,7 @@ module Gallium
     end
 
     global active_modules = LazyJITModules()
-    global allow_bad_unwind = true
+    global allow_bad_unwind = false
     function rec_backtrace(callback, RC, session = LocalSession(), modules = active_modules, ip_only = false, cfi_cache = nothing; stacktop = true)
         callback(RC) || return
         while true
@@ -334,7 +360,7 @@ module Gallium
         # Array is for DWARF 2 support.
         fbreg = isnull(fbreg) ? -1 :
             (isa(get(fbreg).value, Array) ? get(fbreg).value[1] : get(fbreg).value.expr[1]) - DWARF.DW_OP_reg0
-        
+
         local getreg
         getreg = (reg)->Gallium.getreg(RC, fbreg, reg)
         getword(addr) = unsafe_load(reinterpret(Ptr{UInt64}, addr))
@@ -414,7 +440,7 @@ module Gallium
         end
         file, line, linetab
     end
-    
+
     function frameinfo(RC, session, modules; rich_c = false, firstframe = false)
         theip = reinterpret(Ptr{Void},UInt(ip(RC)))
         ipinfo = get_ipinfo(session, theip)[end]
@@ -442,7 +468,7 @@ module Gallium
                 end
                 if sp !== nothing
                     file, line, linetab = linetable_entry(dbgs, lip)
-                    
+
                     declfile = DWARF.extract_attribute(sp, DWARF.DW_AT_decl_file)
                     declfile = isnull(declfile) ? "" : linetab.header.file_names[convert(UInt,get(declfile))].name
                     declline = DWARF.extract_attribute(sp, DWARF.DW_AT_decl_line)
@@ -465,7 +491,7 @@ module Gallium
                 if isrelocatable(handle(h))
                     lip = UInt(theip)-1
                 end
-                
+
                 file, line, _ = linetable_entry(dbgs, lip)
 
                 # Process Subprogram to extract local variables
