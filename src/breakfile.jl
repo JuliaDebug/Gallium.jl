@@ -105,7 +105,10 @@ function newmeth_tracer(x::Ptr{Void})
     nothing
 end
 
+global did_arm_breakfile = false
 function arm_breakfile()
+    did_arm_breakfile && return
+    did_arm_breakfile = true
     initial_sweep()
     ccall(:jl_register_newmeth_tracer, Void, (Ptr{Void},), cfunction(newmeth_tracer, Void, (Ptr{Void},)))
 end
@@ -122,6 +125,7 @@ function methods_for_line(meths, line)
 end
 
 function breakpoint(file::AbstractString, line::Int)
+    arm_breakfile()
     bp = Breakpoint()
     found = false
     for (fname, meths) in filemap

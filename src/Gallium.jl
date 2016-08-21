@@ -898,7 +898,6 @@ module Gallium
     function __init__()
         ccall(:jl_register_linfo_tracer, Void, (Ptr{Void},), cfunction(rebreak_tracer,Void,(Ptr{Void},)))
         ccall(:jl_register_method_tracer, Void, (Ptr{Void},), cfunction(method_tracer,Void,(Ptr{Void},)))
-        arm_breakfile()
         update_shlibs!(LocalSession(), active_modules)
     end
 
