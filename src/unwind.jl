@@ -173,20 +173,21 @@ function symbolicate(session, modules, ip)
         if !isa(err, ErrorException) || !contains(err.msg, "not found")
             rethrow(err)
         end
-        return "<Unknown Module>"
+        return (false, "<Unknown Module>")
     end
     modrel = UInt(modulerel(mod, base, ip))
-    if isnull(mod.xpdata)
-        loc, fde = find_fde(mod, modrel)
-    else
-        loc = find_seh_entry(mod, modrel).start
+    loc = modrel
+    approximate = true
+    try
+        if isnull(mod.xpdata)
+            loc, fde = find_fde(mod, modrel)
+            approximate = false
+        elseif !isnull(mod.eh_frame)
+            loc = find_seh_entry(mod, modrel).start
+            approximate = false
+        end
     end
-        #loc = initial_loc(fde, cie)
     sections = Sections(Gallium.dhandle(mod))
-    #=if handle(mod).file.header.e_type == ELF.ET_REL
-        eh_frame = first(filter(x->sectionname(x) == ".eh_frame",sections))
-        fbase += deref(eh_frame).sh_addr - sectionoffset(eh_frame)
-    end=#
     syms = Gallium.get_syms(mod)
     function correct_symbol(x)
         isundef(x) && return (false, UInt64(0))
@@ -202,23 +203,27 @@ function symbolicate(session, modules, ip)
             (mod.inverse_symtab = Nullable(make_inverse_symtab(Gallium.dhandle(mod))))
         idx = searchsortedfirst(TransformedArray(get(mod.inverse_symtab),
             idx->symbolvalue(syms[idx], sections)), loc)
-        while idx <= length(syms)
-            ok, value = correct_symbol(syms[get(mod.inverse_symtab)[idx]])
-            (mod.is_jit_dobj) && (value -= base)
-            (ok && value == loc) && break
-            ok && value > loc && (#=idx = 0;=# break)
-            idx += 1
+        if !approximate
+            while idx <= length(syms)
+                ok, value = correct_symbol(syms[get(mod.inverse_symtab)[idx]])
+                (mod.is_jit_dobj) && (value -= base)
+                (ok && value == loc) && break
+                ok && value > loc && (#=idx = 0;=# break)
+                idx += 1
+            end
         end
         (idx == length(get(mod.inverse_symtab))+1) && (idx = 0)
         idx != 0 && (idx = get(mod.inverse_symtab)[idx])
     else
+        @assert !approximate
         idx = findfirst(syms) do sym
             ok, value = correct_symbol(sym)
             ok && value == loc
         end
     end
     idx == 0 && return "???"
-    symname(syms[idx]; strtab = StrTab(syms))
+    name = symname(syms[idx]; strtab = StrTab(syms))
+    (!approximate, name)
 end
 
 function fetch_cfi_val_value(s, r, resolution, cfa_addr)
@@ -250,8 +255,24 @@ function fetch_cfi_value(s, r, rs, reg, cfa_addr)
 
 end
 
+function unwind_step_frame_pointer!(new_registers, s)
+    # We don't really know anything about how to unwind here, but let's
+    # try frame pointer based unwinding and hope FPO isn't enabled
+    # TODO: Maybe try assembly profiling
+    if isa(getarch(s),X86_64.X86_64Arch)
+        old_rbp = get_dwarf(new_registers, :rbp)
+        set_dwarf!(new_registers, :rbp, get_word(s, RemotePtr{UInt64}(old_rbp)))
+        set_ip!(new_registers, get_word(s, RemotePtr{UInt64}(old_rbp+8)))
+    else
+        old_ebp = get_dwarf(new_registers, :ebp)
+        set_dwarf!(new_registers, :ebp, get_word(s, RemotePtr{UInt32}(old_ebp)))
+        set_ip!(new_registers, get_word(s, RemotePtr{UInt32}(old_ebp+4)))
+    end
+    new_registers
+end
+
 using Gallium: X86_64
-function unwind_step(s, modules, r, cfi_cache = nothing; stacktop = false, ip_only = false)
+function unwind_step(s, modules, r, cfi_cache = nothing; stacktop = false, ip_only = false, allow_frame_based = true)
     new_registers = copy(r)
     # A priori the registers in the new frame will not be valid, we copy them
     # over from above still and propagate as usual in case somebody wants to
@@ -263,10 +284,12 @@ function unwind_step(s, modules, r, cfi_cache = nothing; stacktop = false, ip_on
     modrel = UInt64(ip(r)) - base
 
     # Determine if we have windows or DWARF unwind info
-    if isnull(mod.xpdata)
+    if !isnull(mod.eh_frame)
         cf = try
             frame(s, base, mod, r, stacktop, cfi_cache)
         catch e
+            allow_frame_based &&
+                return (true, unwind_step_frame_pointer!(new_registers, s))
             rethrow(e)
             return (false, r)
         end
@@ -284,7 +307,7 @@ function unwind_step(s, modules, r, cfi_cache = nothing; stacktop = false, ip_on
                 set_dwarf!(new_registers, reg, fetch_cfi_value(s, r, cf.rs, reg, cf.cfa_addr))
             end
         end
-    else
+    elseif !isnull(mod.xpdata)
         entry = find_seh_entry(mod, modrel)
         offs = modrel - entry.start
         frameaddr = 0
@@ -329,6 +352,10 @@ function unwind_step(s, modules, r, cfi_cache = nothing; stacktop = false, ip_on
         old_rsp = get_dwarf(new_registers, :rsp)
         set_ip!(new_registers, get_word(s, RemotePtr{UInt64}(old_rsp)))
         set_dwarf!(new_registers, :rsp, old_rsp+8)
+    else
+        allow_frame_based &&
+            return (true, unwind_step_frame_pointer!(new_registers, s))
+        error("Ununwindable module")
     end
     UInt(ip(new_registers)) == 0 &&  return (false, r)
     (true, new_registers)

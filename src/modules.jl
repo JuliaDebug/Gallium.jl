@@ -14,7 +14,7 @@ the current process's address space.
 type Module{T<:ObjFileBase.ObjectHandle, SR<:ObjFileBase.SectionRef}
     handle::T
     base::UInt64
-    # The .eh_frame section when unwinding using DWARF
+    # The .eh_frame (or .debug_frame) section when unwinding using DWARF
     eh_frame::Nullable{SR}
     # Either a DWARF or SEH header/unwind table pair
     ehfr::Nullable{EhFrameRef}
@@ -672,10 +672,23 @@ module WinDyldModules
 
     function mod_for_h(dllbase, h)
         sects = Sections(h)
-        pdata = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"pdata"),sects))[]
-        xdata = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"xdata"),sects))[]
-        Gallium.Module(h, UInt64(dllbase), Nullable{typeof(pdata)}(), Nullable{EhFrameRef}(),
-            Nullable{XPUnwindRef}(XPUnwindRef(xdata, pdata)), h,
+        pdatas = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"pdata"),sects))
+        xdatas = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"xdata"),sects))
+        xpdata = Nullable{XPUnwindRef}()
+        ehframe = Nullable{typeof(first(sects))}()
+        if !isempty(pdatas) && !isempty(xdatas)
+            Nullable{XPUnwindRef}(XPUnwindRef(xdatas[], pdatas[]))
+        else
+            # Try to find any eh_frame or debug_frame sections (e.g. MinGW compilers)
+            eh_frames = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"eh_frame"),sects))
+            debug_frames = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"debug_frame"),sects))
+            ehframe = !isempty(eh_frames) ? Nullable(eh_frames[]) : 
+                      !isempty(debug_frames) ? Nullable(debug_frames[]) :
+                      ehframe
+            @show ehframe
+        end
+        Gallium.Module(h, UInt64(dllbase), ehframe, Nullable{EhFrameRef}(),
+            xpdata, h,
             Nullable{InverseSymtab}(),
             Nullable(Vector{Tuple{Int,UInt}}()),
             Nullable(CIECache()), Gallium.compute_mod_size(h), false)

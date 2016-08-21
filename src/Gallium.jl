@@ -177,17 +177,15 @@ module Gallium
     end
 
     function compute_ip(handle, base, theip)
-        if isa(handle, ELF.ELFHandle) && ObjFileBase.isexecutable(handle)
+        if isa(handle, ELF.ELFHandle)
             phs = ELF.ProgramHeaders(handle)
             idx = findfirst(p->p.p_offset==0&&p.p_type==ELF.PT_LOAD, phs)
-            UInt(theip + (phs[idx].p_vaddr - base))
+            UInt(theip + (phs[idx].p_vaddr-base))
         elseif isa(handle, COFF.COFFHandle)
             # Map from loaded address to file address
             UInt(theip) + (Int(COFF.readoptheader(handle).windows.ImageBase) - Int(base))
         elseif ObjFileBase.isrelocatable(handle)
             UInt(theip)
-        else
-            UInt(theip - base)
         end
     end
 
@@ -294,7 +292,7 @@ module Gallium
     end
 
     global active_modules = LazyJITModules()
-    global allow_bad_unwind = false
+    global allow_bad_unwind = true
     function rec_backtrace(callback, RC, session = LocalSession(), modules = active_modules, ip_only = false, cfi_cache = nothing; stacktop = true)
         callback(RC) || return
         while true
