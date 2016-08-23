@@ -29,10 +29,11 @@ type Module{T<:ObjFileBase.ObjectHandle, SR<:ObjFileBase.SectionRef}
     ciecache::Nullable{CIECache}
     sz::UInt
     is_jit_dobj::Bool
+    is_eh_not_debug::Bool
 end
 Module(handle, eh_frame, eh_frame_hdr, dwarfhandle, FDETab, ciecache, sz) =
     Module{typeof(handle),typeof(eh_frame)}(handle, eh_frame, eh_frame_hdr,
-        Nullable{XPUnwindRef}(), dwarfhandle, FDETab, ciecache, sz, false)
+        Nullable{XPUnwindRef}(), dwarfhandle, FDETab, ciecache, sz, false, true)
 
 """
 A way to obtain new modules, e.g. dynamic libraries or jit modules
@@ -121,20 +122,22 @@ end
 """
 base is the remote address of the text section
 """
-function make_fdetab(base, mod, is_eh_not_debug=true)
+function make_fdetab(base, mod, is_eh_not_debug=isa(mod, Module)?mod.is_eh_not_debug:true)
     FDETab = Vector{Tuple{Int,UInt}}()
-    eh_frame = find_ehframes(mod)[]
-    for fde in FDEIterator(eh_frame,is_eh_not_debug)
+    eh_frame = find_ehframes(mod)[1]
+    for fde in FDEIterator(eh_frame,is_eh_not_debug,ObjFileBase.intptr(handle(mod)))
         # Make this location, relative to base. Note that base means something different,
         # depending on whether we're isrelocatable or not. If we are, base is the load address
         # of the text section. Otherwise, base is the load address of the start of the mapping.
-        if isa(mod, ELF.ELFHandle)
+        if isa(handle(mod), ELF.ELFHandle)
             # For relocated ELF Objects and unlrelocated shared libraries,
             # it is an offset from the load address of the FDE (in the shared library case,
             # sh_addr == sectionoffset).
             ip = (Int(deref(eh_frame).sh_addr) - Int(sectionoffset(eh_frame)) +
                 Int(initial_loc(fde))) - Int(UInt(base))
-        elseif isrelocatable(mod)
+        elseif isa(handle(mod), COFF.COFFHandle)
+            ip = initial_loc(fde) - COFF.readoptheader(handle(mod)).windows.ImageBase
+        elseif isrelocatable(handle(mod))
             # MachO eh_frame section doesn't get relocated, so it's still relative to
             # the file's local address space.
             text = first(filter(x->sectionname(x)==mangle_sname(mod,"text"),Sections(mod)))
@@ -206,7 +209,7 @@ find_ehfr(h) = EhFrameRef(find_eh_frame_hdr(h), find_ehframes(h)[1])
                 Nullable{XPUnwindRef}(),
                 obtain_dsym(fname, h), Nullable{InverseSymtab}(),
                 Nullable{FDETab}(), Nullable{CIECache}(),
-                compute_mod_size(h), false)
+                compute_mod_size(h), false, true)
         return true
     end
 
@@ -308,7 +311,7 @@ function jit_mod_for_h(buf, h, sstart)
     ciecache = CIECache()
     if isrelocatable(h)
       isa(h, ELF.ELFHandle) && ELF.relocate!(buf, h)
-      fdetab = make_fdetab(sstart, h)
+      fdetab = make_fdetab(sstart, h, true)
       if isa(h, MachO.MachOHandle)
         LOI = Dict(:__text => sstart,
             :__debug_str=>0) #This one really shouldn't be necessary
@@ -322,11 +325,11 @@ function jit_mod_for_h(buf, h, sstart)
         xdata = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"xdata"),sects))[]
         xpdata = Nullable{XPUnwindRef}(XPUnwindRef(xdata, pdata))
     end
-    isa(h, MachO.MachOHandle) && isempty(fdetab) && (fdetab = make_fdetab(sstart, h))
+    isa(h, MachO.MachOHandle) && isempty(fdetab) && (fdetab = make_fdetab(sstart, h, true))
     eh_frame = find_ehframes(h)[]
     Module(h, sstart, Nullable(eh_frame),
         ehfr, xpdata, h, Nullable{InverseSymtab}(),
-        Nullable(fdetab), Nullable{CIECache}(), compute_mod_size(h), true)
+        Nullable(fdetab), Nullable{CIECache}(), compute_mod_size(h), true, true)
 end
 
 function retrieve_obj_data(s::LocalSession, modules, ip)
@@ -498,7 +501,7 @@ module GlibcDyldModules
         Nullable{InverseSymtab}(),
         Nullable{FDETab}(),
         Nullable{CIECache}(),
-        Gallium.compute_mod_size(h), false)
+        Gallium.compute_mod_size(h), false, true)
   end
 
   immutable GlibCRemoteSource <: ModuleSource
@@ -676,6 +679,7 @@ module WinDyldModules
         xdatas = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"xdata"),sects))
         xpdata = Nullable{XPUnwindRef}()
         ehframe = Nullable{typeof(first(sects))}()
+        is_eh_not_debug = true
         if !isempty(pdatas) && !isempty(xdatas)
             Nullable{XPUnwindRef}(XPUnwindRef(xdatas[], pdatas[]))
         else
@@ -685,13 +689,13 @@ module WinDyldModules
             ehframe = !isempty(eh_frames) ? Nullable(eh_frames[]) : 
                       !isempty(debug_frames) ? Nullable(debug_frames[]) :
                       ehframe
-            @show ehframe
+            is_eh_not_debug = !isempty(eh_frames)
         end
         Gallium.Module(h, UInt64(dllbase), ehframe, Nullable{EhFrameRef}(),
             xpdata, h,
             Nullable{InverseSymtab}(),
-            Nullable(Vector{Tuple{Int,UInt}}()),
-            Nullable(CIECache()), Gallium.compute_mod_size(h), false)
+            Nullable{Vector{Tuple{Int,UInt}}}(),
+            Nullable{CIECache}(), Gallium.compute_mod_size(h), false, is_eh_not_debug)
     end
 
     const PEB_LDR_DATA_IDX      = 3

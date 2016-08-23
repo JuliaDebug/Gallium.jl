@@ -107,10 +107,10 @@ end
 
 global did_arm_breakfile = false
 function arm_breakfile()
+    global did_arm_breakfile
     did_arm_breakfile && return
     did_arm_breakfile = true
     initial_sweep()
-    ccall(:jl_register_newmeth_tracer, Void, (Ptr{Void},), cfunction(newmeth_tracer, Void, (Ptr{Void},)))
 end
 
 function methods_for_line(meths, line)

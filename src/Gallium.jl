@@ -119,13 +119,15 @@ module Gallium
         modrel = UInt(ip - base)
         loc, fde = Unwinder.find_fde(mod, modrel)
         cie = realize_cie(fde)
-        target_delta = modrel - loc - 1
+        target_delta = modrel - loc
         out = IOContext(STDOUT, :reg_map =>
             isa(Gallium.getarch(state.top_interp.session),Gallium.X86_64.X86_64Arch) ?
             Gallium.X86_64.dwarf_numbering : Gallium.X86_32.dwarf_numbering)
         drs = CallFrameInfo.RegStates()
-        CallFrameInfo.dump_program(out, cie, target = UInt(target_delta), rs = drs); println(out)
-        CallFrameInfo.dump_program(out, fde, cie = cie, target = UInt(target_delta), rs = drs)
+        CallFrameInfo.dump_program(out, cie, ptrT = ObjFileBase.intptr(ObjFileBase.handle(mod)),
+            target = UInt(target_delta), rs = drs); println(out)
+        CallFrameInfo.dump_program(out, fde,
+            cie = cie, target = UInt(target_delta), rs = drs)
         return false
     end
 
@@ -297,9 +299,13 @@ module Gallium
         callback(RC) || return
         while true
             (ok, RC) = try
-                Unwinder.unwind_step(session, modules, RC, cfi_cache; stacktop = stacktop, ip_only = ip_only)
+                Unwinder.unwind_step(session, modules, RC, cfi_cache;
+                    stacktop = stacktop, ip_only = ip_only, allow_frame_based=allow_bad_unwind)
             catch e # e.g. invalid memory access, invalid unwind info etc.
-                allow_bad_unwind::Bool || rethrow(e)
+                if !allow_bad_unwind::Bool
+                    println("Was at ip: ", ip(RC))
+                    rethrow(e)
+                end
                 break
             end
             stacktop = false
@@ -898,6 +904,7 @@ module Gallium
     function __init__()
         ccall(:jl_register_linfo_tracer, Void, (Ptr{Void},), cfunction(rebreak_tracer,Void,(Ptr{Void},)))
         ccall(:jl_register_method_tracer, Void, (Ptr{Void},), cfunction(method_tracer,Void,(Ptr{Void},)))
+        ccall(:jl_register_newmeth_tracer, Void, (Ptr{Void},), cfunction(newmeth_tracer, Void, (Ptr{Void},)))
         update_shlibs!(LocalSession(), active_modules)
     end
 

@@ -35,8 +35,9 @@ function find_fde(mod, modrel)
     eh_frame = Gallium.find_ehframes(mod)[1]
     if isa(mod, Module) && isnull(mod.ehfr)
         isnull(mod.FDETab) &&
-            (mod.FDETab = Nullable(make_fdetab(mod.base, mod.handle)))
-        return CallFrameInfo.search_fde_offset(eh_frame, get(mod.FDETab), modrel, slide)
+            (mod.FDETab = Nullable(make_fdetab(mod.base, mod)))
+        return CallFrameInfo.search_fde_offset(eh_frame, get(mod.FDETab),
+            modrel, slide, is_eh_not_debug = mod.is_eh_not_debug)
     else
         tab = Gallium.find_ehfr(mod)
         modrel = Int(modrel)-Int(sectionoffset(tab.hdr_sec))
@@ -70,7 +71,7 @@ end
 get_ciecache(_) = nothing
 function get_ciecache(mod::Module)
     if isnull(mod.ciecache) && !isnull(mod.eh_frame)
-        CallFrameInfo.precompute(get(mod.eh_frame))
+        CallFrameInfo.precompute(get(mod.eh_frame), mod.is_eh_not_debug)
     end
     isnull(mod.ciecache) && return nothing
     get(mod.ciecache)
@@ -96,7 +97,7 @@ function compute_register_states(s, base, mod, r, stacktop, ::Void)
     # Compute CFA
     target_delta::UInt64 = modrel - loc - (stacktop?0:1)
     @assert target_delta < UInt(CallFrameInfo.fde_range(fde, cie))
-    #out = IOContext(STDOUT, :reg_map => Gallium.X86_64.dwarf_numbering)
+    #out = STDOUT #IOContext(STDOUT, :reg_map => Gallium.X86_64.dwarf_numbering)
     #drs = CallFrameInfo.RegStates()
     #CallFrameInfo.dump_program(out, cie, target = UInt(target_delta), rs = drs); println(out)
     #CallFrameInfo.dump_program(out, fde, cie = cie, target = UInt(target_delta), rs = drs)
@@ -179,10 +180,10 @@ function symbolicate(session, modules, ip)
     loc = modrel
     approximate = true
     try
-        if isnull(mod.xpdata)
+        if !isnull(mod.eh_frame)
             loc, fde = find_fde(mod, modrel)
             approximate = false
-        elseif !isnull(mod.eh_frame)
+        elseif !isnull(mod.xpdata)
             loc = find_seh_entry(mod, modrel).start
             approximate = false
         end

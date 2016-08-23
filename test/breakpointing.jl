@@ -48,7 +48,7 @@ function somefunc()
     return nothing
 end
 @test somefunc() == nothing
-Gallium.breakpoint(somefunc)
+sfbp = Gallium.breakpoint(somefunc)
 @test somefunc() == nothing
 @test which_counter == 2
 @test hit_counter == 1
