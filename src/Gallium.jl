@@ -185,7 +185,7 @@ module Gallium
             UInt(theip + (phs[idx].p_vaddr-base))
         elseif isa(handle, COFF.COFFHandle)
             # Map from loaded address to file address
-            UInt(theip) + (Int(COFF.readoptheader(handle).windows.ImageBase) - Int(base))
+            UInt(theip) + (UInt(COFF.readoptheader(handle).windows.ImageBase) - UInt(base))
         elseif ObjFileBase.isrelocatable(handle)
             UInt(theip)
         end

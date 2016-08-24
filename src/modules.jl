@@ -681,7 +681,7 @@ module WinDyldModules
         ehframe = Nullable{typeof(first(sects))}()
         is_eh_not_debug = true
         if !isempty(pdatas) && !isempty(xdatas)
-            Nullable{XPUnwindRef}(XPUnwindRef(xdatas[], pdatas[]))
+            xpdata = Nullable{XPUnwindRef}(XPUnwindRef(xdatas[], pdatas[]))
         else
             # Try to find any eh_frame or debug_frame sections (e.g. MinGW compilers)
             eh_frames = collect(filter(x->sectionname(x)==ObjFileBase.mangle_sname(h,"eh_frame"),sects))
