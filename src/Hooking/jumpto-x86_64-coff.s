@@ -20,9 +20,8 @@ movq    %rbx, 8(%rax)
 movq     UC_MCONTEXT_GREGS_RAX(%rcx), %rax
 movq     UC_MCONTEXT_GREGS_RBX(%rcx), %rbx
 # restore rcx later
-movq     UC_MCONTEXT_GREGS_RCX(%rcx), %rcx
 movq     UC_MCONTEXT_GREGS_RDX(%rcx), %rdx
-movq     UC_MCONTEXT_GREGS_RDI(%rcx), %rsi
+movq     UC_MCONTEXT_GREGS_RDI(%rcx), %rdi
 movq     UC_MCONTEXT_GREGS_RSI(%rcx), %rsi
 movq     UC_MCONTEXT_GREGS_RBP(%rcx), %rbp
 # restore rsp later
