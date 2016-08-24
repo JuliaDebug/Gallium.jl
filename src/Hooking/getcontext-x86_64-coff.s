@@ -57,7 +57,13 @@ movq    %rbx,   0x38+512+UC_MCONTEXT_SIZE(%rsp)
 
 # The actual xsave
 xsave   UC_MCONTEXT_SIZE(%rsp)
-movq    %rsp,    %rdi
+movq    %rsp,    %rcx
+
+# Align stack for call
+subq    $8, %rsp
+pushq   %rsi           # Makes the debugger's life easier
+movq hooking_jl_callback@GOTPCREL(%rip), %rax
+jmpq *%rax
 
 .text
 .align 4,0x90
@@ -103,4 +109,3 @@ movq    %rsi,   0x38+512+UC_MCONTEXT_SIZE(%rdi)
 xsave   UC_MCONTEXT_SIZE(%rdi)
 
 retq
-
