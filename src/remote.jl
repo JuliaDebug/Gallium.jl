@@ -55,13 +55,19 @@ function segment_base
 end
 
 # Simple session to put some data at specific addresses
-immutable FakeMemorySession
+immutable FakeMemorySession{T}
     memory_maps::Vector{Tuple{UInt64,Vector{UInt8}}}
+    arch
+    asid::T
 end
+Base.show(io::IO, sess::FakeMemorySession) = print(io,"FakeMemorySession(arch=$(sess.arch),asid=$(sess.asid))")
+FakeMemorySession(maps,arch) = FakeMemorySession{Void}(maps, arch, nothing)
+current_asid(sess::FakeMemorySession) = sess.asid
+getarch(sess::FakeMemorySession) = sess.arch
 
 function load{T}(mem::FakeMemorySession, ptr::RemotePtr{T})
     for (addr, data) in mem.memory_maps
-        if addr <= UInt64(ptr) <= addr + sizeof(data)
+        if addr <= UInt64(ptr) <= addr + sizeof(data) - sizeof(T)
             start = (UInt64(ptr)-addr)
             return reinterpret(T,data[1+start:start+sizeof(T)])[]
         end

@@ -73,3 +73,5 @@ try; xmmerrtest(1.0); end
 @test hit_breakpoint
 empty!(Gallium.bp_on_error_conditions)
 Gallium.breakpoint_on_error(false)
+
+include("fakememory.jl")
