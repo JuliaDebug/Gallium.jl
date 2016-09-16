@@ -775,7 +775,8 @@ immutable LinuxKernelModule
     # Kernel Symbol table
     addrs::Vector{UInt64}
     names::Vector{String}
-    function LinuxKernelModule()
+    mapped_size::UInt64
+    function LinuxKernelModule(mapped_size)
         addrs = UInt64[]
         names = String[]
         for line in eachline("/proc/kallsyms")
@@ -783,11 +784,12 @@ immutable LinuxKernelModule
             push!(addrs, parse(UInt64,pieces[1],16))
             push!(names, pieces[3][1:end-1])
         end
-        new(addrs, names)
+        new(addrs, names, mapped_size)
     end
 end
+compute_mod_size(mod::LinuxKernelModule) = mod.mapped_size
 
-function symbolicate(kern::LinuxKernelModule, ip)
+function symbolicate(sess, base, kern::LinuxKernelModule, ip)
     id = searchsortedlast(kern.addrs, ip)
-    kern.names[id]
+    (true, kern.names[id])
 end

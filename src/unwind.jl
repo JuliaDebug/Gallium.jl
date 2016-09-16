@@ -176,6 +176,9 @@ function symbolicate(session, modules, ip)
         end
         return (false, "<Unknown Module>")
     end
+    symbolicate(session, base, mod, ip)
+end
+function symbolicate(session, base, mod, ip)
     modrel = UInt(modulerel(mod, base, ip))
     loc = modrel
     approximate = true
