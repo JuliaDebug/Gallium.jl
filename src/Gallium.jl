@@ -259,7 +259,7 @@ module Gallium
     end
 
 
-    export breakpoint
+    export breakpoint, breakpoint_on_error
 
     # Move this somewhere better
     function ObjFileBase.getSectionLoadAddress(LOI::Dict, sec)
