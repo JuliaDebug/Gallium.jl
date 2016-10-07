@@ -160,6 +160,7 @@ include("backtraces.jl")
 immutable Hook
     addr::Ptr{Void}
     orig_data::Vector{UInt8}
+    auto_suspend::Bool
     callback::Function
 end
 
@@ -286,6 +287,9 @@ end
     hook = hooks[reinterpret(Ptr{Void},hook_addr)]
     cb_RC = copy(RC)
     set_ip!(cb_RC, hook_addr+1)
+    if hook.auto_suspend
+        unhook(hook)
+    end
     ret = hook.callback(hook, cb_RC)
     if isa(ret, Deopt)
         ret_addr = ret.addr
@@ -425,7 +429,7 @@ function determine_nbytes_to_replace(bytes_required, orig_bytes)
     determine_nbytes_to_replace(bytes_required, Ptr{Void}(pointer(orig_bytes)))
 end
 
-function hook(callback::Function, addr)
+function hook(callback::Function, addr; auto_suspend = false)
     # Compute number of bytes by disassembly
     # Ideally we would also check for uses of rip and branches here and error
     # out if any are found, but for now we don't need to
@@ -443,7 +447,7 @@ function hook(callback::Function, addr)
         dest[:] = hook_asm
     end
 
-    hooks[addr] = Hook(addr,orig_data,callback)
+    hooks[addr] = Hook(addr,orig_data,auto_suspend,callback)
 end
 
 function hook(thehook::Hook)

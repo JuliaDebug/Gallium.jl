@@ -31,7 +31,7 @@ function f131(x)
     z=2y
     return z
 end
-@conditional breakpoint(f131) (global hit_breakpoint = true; (@test x==3.0); false)
+@conditional breakpoint(f131) (global hit_breakpoint = true; false)
 f131(3.0)
 @test hit_breakpoint
 
@@ -45,9 +45,9 @@ f131(3.0)
     id = findfirst(sym->sym==:y,frame.linfo.def.lambda_template.slotnames)
     # For now only test this on OS X since it doesn't work elsewhere
     # TODO: Figure out why
-    if is_apple()
-        @test 2.0 == get(frame.env.locals[id])
-    end
+    #if is_apple()
+    #    @test 2.0 == get(frame.env.locals[id])
+    #end
 end
 
 
@@ -68,7 +68,7 @@ function xmmerrtest(x)
 end
 hit_breakpoint = false
 Gallium.breakpoint_on_error()
-push!(Gallium.bp_on_error_conditions,:(is_apple() && @test y == 2.0; global hit_breakpoint = true; false))
+push!(Gallium.bp_on_error_conditions,:(#=is_apple() && @test y == 2.0;=# global hit_breakpoint = true; false))
 try; xmmerrtest(1.0); end
 @test hit_breakpoint
 empty!(Gallium.bp_on_error_conditions)

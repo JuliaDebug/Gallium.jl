@@ -935,23 +935,22 @@ module Gallium
 
     const bp_on_error_conditions = Any[]
     function breakpoint_on_error_hit(thehook, RC)
-        unhook(thehook)
         err = unsafe_pointer_to_objref(Ptr{Void}(get_dwarf(RC, :rdi)[]))
         stack = stackwalk(RC; fromhook = true)[1]
+        ips = [x.ip-1 for x in stack]
         stack = NativeStack(filter(x->isa(x,JuliaStackFrame),stack))
         if !isempty(bp_on_error_conditions) &&
             !any(c->Gallium.matches_condition(stack,c),bp_on_error_conditions)
             hook(thehook)
             rethrow(err)
         end
-        ips = [x.ip-1 for x in stack]
         Base.with_output_color(:red, STDERR) do io
             print(io, "ERROR: ")
             Base.showerror(io, err, reverse(ips); backtrace=false)
             println(io)
         end
         println(STDOUT)
-        ASTInterpreter.RunDebugREPL()
+        ASTInterpreter.RunDebugREPL(stack)
         # Get a somewhat sensible backtrace when returning
         try; throw(); catch; end
         hook(thehook)
@@ -966,7 +965,7 @@ module Gallium
     function breakpoint_on_error(enable = true)
         addr = cglobal(:jl_throw)
         if enable
-            hook(breakpoint_on_error_hit, addr)
+            hook(breakpoint_on_error_hit, addr; auto_suspend = true)
         else
             unhook(addr)
         end
