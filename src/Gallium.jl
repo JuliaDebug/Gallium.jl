@@ -17,6 +17,7 @@ module Gallium
     include("registers.jl")
     include("x86_64/registers.jl")
     include("x86_32/registers.jl")
+    include("powerpc64le/registers.jl")
     include("win64seh.jl")
     include("modules.jl")
     include("unwind.jl")

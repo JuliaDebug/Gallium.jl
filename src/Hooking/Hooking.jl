@@ -334,7 +334,7 @@ function callback(x::Ptr{Void})
     nothing
 end
 
-const hooking_lib = joinpath(dirname(@__FILE__),"hooking")
+const hooking_lib = joinpath(dirname(@__FILE__),string("hooking-",Sys.ARCH))
 
 function __init__()
     global resume
