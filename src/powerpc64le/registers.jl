@@ -16,7 +16,7 @@ module PowerPC64
     109 => :ctr, 110 => :pc
   )
   const inverse_dwarf = map(p->p[2]=>p[1], dwarf_numbering)
-  const basic_regs = keys(dwarf_numbering)
+  const basic_regs = sort(collect(keys(dwarf_numbering)))
   const extended_registers = 17:32
 
   const gdb_numbering = Dict{Int, Symbol}(
@@ -56,9 +56,17 @@ module PowerPC64
       end
   end
 
+  function copy(regs::BasicRegs)
+      ret = BasicRegs()
+      for i = 1:nfields(regs)
+          setfield!(ret, i, getfield(regs, i))
+      end
+      ret
+  end
+
   function Base.show(io::IO, regs::BasicRegs)
       for (i,reg) in enumerate(fieldnames(typeof(regs)))
-          println(io," "^(3-length(string(reg))),reg," ",getfield(regs, i))
+          println(io," "^(5-length(string(reg))),reg," ",getfield(regs, i))
       end
   end
 

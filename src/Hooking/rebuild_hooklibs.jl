@@ -3,7 +3,9 @@ function rebuild_lib(file, triple, oname)
     contents = readstring(file)
     replacements = collect(
         string("UC_MCONTEXT_GREGS_",uppercase(string(dwarf_numbering[idx])))=>
-            string(idx*sizeof(Ptr{Void})) for idx in basic_regs)
+            string(sizeof(UInt64)*(findfirst(i->fieldname(BasicRegs,i)==dwarf_numbering[idx],1:nfields(BasicRegs))-1))
+            for idx in basic_regs)
+    @show replacements
     # Sort by length, to avoid replacing substrings first
     replacements = sort(replacements; by=x->length(x[1]),rev=true)
     for (pat, rep) in replacements

@@ -1,7 +1,7 @@
 module Hooking
 
 using Gallium
-using Gallium: X86_64, Registers
+using Gallium: X86_64, PowerPC64, Registers
 using Gallium.Registers: ip
 
 export hook, unhook
@@ -137,11 +137,14 @@ end
 end
 
 @static if is_linux()
-    to_page(addr, size) = (@assert size <= 4096;
-        MemoryRegion(addr-(reinterpret(UInt, addr)%4096),1))
+    const _SC_PAGESIZE = 0x0000001e
+    const PAGE_SIZE = ccall(:sysconf, Clong, (Cint,), _SC_PAGESIZE)
 
-    mprotect(region, flags) = ccall(:mprotect, Cint,
-        (Ptr{Void}, Csize_t, Cint), region.addr, region.size, flags)
+    to_page(addr, size) = (@assert size <= PAGE_SIZE;
+        MemoryRegion(addr-(reinterpret(UInt, addr)%PAGE_SIZE),1))
+
+    mprotect(region, flags) = systemerror("mprotect", ccall(:mprotect, Cint,
+        (Ptr{Void}, Csize_t, Cint), region.addr, region.size, flags) != 0)
 
     function mem_validate(addr, length)
         x = Array(UInt8,2)
@@ -171,8 +174,9 @@ immutable Deopt
     addr::Ptr{Void}
 end
 
-# The text section of jumpto-x86_64-macho.o minus one byte
-const resume_length = 0x6c
+# For x86_64: The text section of jumpto-x86_64-macho.o minus one byte (retq)
+# For powerpc64: Everything until ld %r0, UC_MCONTEXT_GREGS_PC(%r3)
+const resume_length = Sys.ARCH == :x86_64 ? 0x6c : 0x128
 
 function hook_asm_template(hook_addr, target_addr; call = true)
     diff = (target_addr - (hook_addr + 5))%Int32
@@ -234,7 +238,7 @@ function return_hook_template(alt_stack, func)
 end
 
 
-function hook_asm_template(addr)
+function hook_asm_template(::X86_64.X86_64Arch, addr)
     [
         0x90; # 0xcc
         0x50; #pushq   %rax
@@ -243,12 +247,42 @@ function hook_asm_template(addr)
         0xff; 0xd0; #callq *%rax
     ]
 end
-hook_asm_template() = (global thehook; hook_asm_template(thehook))
-const hook_length = length(hook_asm_template(UInt(0)))
 
-function hook_tail_template(extra_instructions, ret_addr)
+function powerpc_64bit_constant(addr)
+    addr_bytes = reinterpret(UInt8,[addr])
+    UInt8[
+        addr_bytes[7:8]...,0x00,(15 << 2), # addis r0, 0, addr >> 48
+        addr_bytes[5:6]...,0x00,(24 << 2), # ori r0, r0, addr >> 32
+        0xc6, 0x07, 0x00, 0x78, # rldicr  r0, r0, 32, 31
+        addr_bytes[3:4]...,0x00,(25 << 2), # oris r0, r0, addr >> 16
+        addr_bytes[1:2]...,0x00,(24 << 2),  # ori r0, r0, addr >> 0
+    ]
+end
+
+function hook_asm_template(::PowerPC64.PowerPC64Arch, addr)
+    # N.B.: We assume r0 is volatile and do not restore it.
+    [
+        0xa6, 0x02, 0x08, 0x7c, # mflr 0
+        # N.B.: This assumes we're at the beginning of the function
+        0x04, 0x00, 0x01, 0xf8, # std 0, 4(1)
+        powerpc_64bit_constant(addr)...,
+        0xa6, 0x03, 0x08, 0x7c, # mtlr 0
+        0x21, 0x00, 0x80, 0x4e  # blrl
+    ]
+end
+hook_asm_template(arch) = (global thehook; hook_asm_template(arch, thehook))
+
+host_arch() = Sys.ARCH == :x86_64 ? X86_64.X86_64Arch() :
+                Sys.ARCH == :powerpc64le ? PowerPC64.PowerPC64Arch() :
+                error("Unknown Architecture")
+
+const hook_length = length(hook_asm_template(host_arch(), UInt(0)))
+
+function hook_tail_template(::X86_64.X86_64Arch, extra_instructions, ret_addr)
     addr_bytes = reinterpret(UInt8,[ret_addr])
     [
+    # Counteract the pushq %rip in the resume code
+    0x48, 0x83, 0xc4, 0x8, # addq $8, %rsp
     # Is this a good idea? Probably not
     extra_instructions...,
     0x66, 0x68, addr_bytes[7:8]...,
@@ -256,6 +290,20 @@ function hook_tail_template(extra_instructions, ret_addr)
     0x66, 0x68, addr_bytes[3:4]...,
     0x66, 0x68, addr_bytes[1:2]...,
     0xc3
+    ]
+end
+
+function hook_tail_template(::PowerPC64.PowerPC64Arch, extra_instructions, ret_addr)
+    # We branch through ctr here rather than lr because we want to preserve
+    # the lr the de-opt would have seen if we hadn't intercepted it. CTR
+    # is considered volatile, so this shouldn't be a problem.
+    UInt8[
+        powerpc_64bit_constant(ret_addr)...,
+        extra_instructions...,
+        0xa6, 0x03, 0x09, 0x7c, # mtctr    r0
+        0x00, 0x00, 0x03, 0xe8, # ld      r0,0(r3)
+        0x18, 0x00, 0x63, 0xe8, # ld      r3,24(r3)
+        0x20, 0x04, 0x80, 0x4e, # bctr
     ]
 end
 
@@ -273,17 +321,28 @@ function aligned_xsave_RC()
     RCnew, rcptr
 end
 
+invalidate_instruction_cache() = nothing
+
 # Split this out to avoid constructing a gc frame in the callback directly
 @noinline function _callback(x::Ptr{Void})
-    RC = X86_64.BasicRegs()
-    regs = unsafe_wrap(Array, Ptr{UInt64}(x), (length(X86_64.basic_regs),), false)
-    for i in X86_64.basic_regs
-        set_dwarf!(RC, i, RegisterValue{UInt64}(regs[i+1], (-1%UInt64)))
+    local RC
+    if Sys.ARCH == :x86_64
+        RC = X86_64.BasicRegs()
+        regs = unsafe_wrap(Array, Ptr{UInt64}(x), (length(X86_64.basic_regs),), false)
+        for i in X86_64.basic_regs
+            set_dwarf!(RC, i, RegisterValue{UInt64}(regs[i+1], (-1%UInt64)))
+        end
+        xsave_ptr = Ptr{UInt8}(x+sizeof(Ptr{Void})*length(X86_64.basic_regs))
+        RC = X86_64.ExtendedRegs(RC,
+            unsafe_load(Ptr{fieldtype(X86_64.ExtendedRegs,:xsave_state)}(xsave_ptr)))
+        hook_addr = UInt(ip(RC))-hook_length
+    elseif Sys.ARCH == :powerpc64le
+        RC = PowerPC64.BasicRegs()
+        for i = 1:nfields(PowerPC64.BasicRegs)
+            setfield!(RC, i, RegisterValue{UInt64}(unsafe_load(Ptr{UInt64}(x), i), (-1%UInt64)))
+        end
+        hook_addr = UInt(ip(RC))-hook_length
     end
-    xsave_ptr = Ptr{UInt8}(x+sizeof(Ptr{Void})*length(X86_64.basic_regs))
-    RC = X86_64.ExtendedRegs(RC,
-        unsafe_load(Ptr{fieldtype(X86_64.ExtendedRegs,:xsave_state)}(xsave_ptr)))
-    hook_addr = UInt(ip(RC))-hook_length
     hook = hooks[reinterpret(Ptr{Void},hook_addr)]
     cb_RC = copy(RC)
     set_ip!(cb_RC, hook_addr+1)
@@ -293,7 +352,11 @@ end
     ret = hook.callback(hook, cb_RC)
     if isa(ret, Deopt)
         ret_addr = ret.addr
-        extra_instructions = []
+        extra_instructions = Sys.ARCH == :powerpc64le ?
+        # On powerpc, we also need to put the function pointer in r12
+        # to make sure the toc gets restored by the entry stub
+        UInt8[0x78, 0x03, 0x0c, 0x7c] : # mr 12, 0
+        []
     else
         ret_addr = hook_addr+length(hook.orig_data)
         extra_instructions = hook.orig_data
@@ -301,26 +364,30 @@ end
     resume_data = [
         #0xcc,
         resume_instructions;
-        # Counteract the pushq %rip in the resume code
-        0x48; 0x83; 0xc4; 0x8; # addq $8, %rsp
-        hook_tail_template(extra_instructions, ret_addr)
+        hook_tail_template(host_arch(), extra_instructions, ret_addr)
     ]
     global callback_rwx
     callback_rwx[1:length(resume_data)] = resume_data
 
-    # invalidate instruction cache here if ever ported to other
-    # architectures
+    invalidate_instruction_cache()
 
     RCnew, rcptr = aligned_xsave_RC()
-    npad = UInt(rcptr - pointer(RCnew))
 
-    # For alignment purposes
-    RCnew[1:npad] = 0
-    RCnew[npad+1:end] = UInt8[reinterpret(UInt8,
-        UInt64[
-            [get_dwarf(RC, i)[] for i in X86_64.basic_regs];
-            reinterpret(UInt64,[RC.xsave_state])]);
-        UInt8[0 for i = 1:(64-npad)]]
+    if Sys.ARCH == :x86_64
+        npad = UInt(rcptr - pointer(RCnew))
+        # For alignment purposes
+        RCnew[1:npad] = 0
+        RCnew[npad+1:end] = UInt8[reinterpret(UInt8,
+            UInt64[
+                [get_dwarf(RC, i)[] for i in X86_64.basic_regs];
+                reinterpret(UInt64,[RC.xsave_state])]);
+            UInt8[0 for i = 1:(64-npad)]]
+    else
+        RCnew[1:nfields(PowerPC64.BasicRegs)*sizeof(UInt64)] =
+            reinterpret(UInt8,
+                UInt64[getfield(RC, i) for i in 1:nfields(PowerPC64.BasicRegs)])
+        rcptr = pointer(RCnew)
+    end
 
     ptr = convert(Ptr{Void},pointer(callback_rwx))::Ptr{Void}
     ptr, Ptr{UInt64}(rcptr)::Ptr{UInt64}
@@ -334,45 +401,48 @@ function callback(x::Ptr{Void})
     nothing
 end
 
-const hooking_lib = joinpath(dirname(@__FILE__),string("hooking-",Sys.ARCH))
+if !haskey(ENV,"GALLIUM_REBUILDING_HOOKING")
+    const hooking_lib = joinpath(dirname(@__FILE__),string("hooking-",Sys.ARCH))
+    global __init__
 
-function __init__()
-    global resume
-    global thehook
-    global callback_rwx
-    global resume_instructions
-    here = dirname(@__FILE__)
-    function resume(RC)
-        ccall((:hooking_jl_jumpto, hooking_lib),Void,(Ptr{UInt8},),pointer(RC.data))
+    function __init__()
+        global resume
+        global thehook
+        global callback_rwx
+        global resume_instructions
+        here = dirname(@__FILE__)
+        function resume(RC)
+            ccall((:hooking_jl_jumpto, hooking_lib),Void,(Ptr{UInt8},),pointer(RC.data))
+        end
+        theresume = cglobal((:hooking_jl_jumpto, hooking_lib), Ptr{UInt8})
+        resume_instructions = unsafe_wrap(Array, convert(Ptr{UInt8}, theresume),
+            (resume_length,), false)
+        # Allocate an RWX page for the callback return
+        callback_rwx = @static if is_apple()
+            region = mach_check(mach_vm_allocate(4096)...)
+            mach_check(mach_vm_protect(region,
+                VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE))
+            region_to_array(region)
+        elseif is_linux()
+            region = MemoryRegion(ccall(:mmap, Ptr{Void},
+                (Ptr{Void}, Csize_t, Cint, Cint, Cint, Csize_t),
+                C_NULL, 4096, PROT_EXEC | PROT_READ | PROT_WRITE,
+                Base.Mmap.MAP_ANONYMOUS | Base.Mmap.MAP_PRIVATE,
+                -1, 0), 4096)
+            Base.systemerror("mmap", reinterpret(Int, region.addr) == -1)
+            region_to_array(region)
+        elseif is_windows()
+            region = MemoryRegion(ccall(:VirtualAlloc, Ptr{Void},
+                (Ptr{Void}, Csize_t, UInt32, UInt32),
+                C_NULL, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 4096)
+            Base.systemerror("VirtualAlloc", reinterpret(Int, region.addr) == 0)
+            region_to_array(region)
+        end
+        thecallback = Base.cfunction(callback,Void,Tuple{Ptr{Void}})::Ptr{Void}
+        ccall((:hooking_jl_set_callback, hooking_lib), Void, (Ptr{Void},),
+            thecallback)
+        thehook = cglobal((:hooking_jl_savecontext, hooking_lib), Ptr{UInt8})
     end
-    theresume = cglobal((:hooking_jl_jumpto, hooking_lib), Ptr{UInt8})
-    resume_instructions = unsafe_wrap(Array, convert(Ptr{UInt8}, theresume),
-        (resume_length,), false)
-    # Allocate an RWX page for the callback return
-    callback_rwx = @static if is_apple()
-        region = mach_check(mach_vm_allocate(4096)...)
-        mach_check(mach_vm_protect(region,
-            VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE))
-        region_to_array(region)
-    elseif is_linux()
-        region = MemoryRegion(ccall(:mmap, Ptr{Void},
-            (Ptr{Void}, Csize_t, Cint, Cint, Cint, Csize_t),
-            C_NULL, 4096, PROT_EXEC | PROT_READ | PROT_WRITE,
-            Base.Mmap.MAP_ANONYMOUS | Base.Mmap.MAP_PRIVATE,
-            -1, 0), 4096)
-        Base.systemerror("mmap", reinterpret(Int, region.addr) == -1)
-        region_to_array(region)
-    elseif is_windows()
-        region = MemoryRegion(ccall(:VirtualAlloc, Ptr{Void},
-            (Ptr{Void}, Csize_t, UInt32, UInt32),
-            C_NULL, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 4096)
-        Base.systemerror("VirtualAlloc", reinterpret(Int, region.addr) == 0)
-        region_to_array(region)
-    end
-    thecallback = Base.cfunction(callback,Void,Tuple{Ptr{Void}})::Ptr{Void}
-    ccall((:hooking_jl_set_callback, hooking_lib), Void, (Ptr{Void},),
-        thecallback)
-    thehook = cglobal((:hooking_jl_savecontext, hooking_lib), Ptr{UInt8})
 end
 
 # High Level Implementation
@@ -402,7 +472,7 @@ function allow_writing(f, region)
     end
 end
 
-function determine_nbytes_to_replace(bytes_required, addr::Ptr{Void})
+function determine_nbytes_to_replace(::X86_64.X86_64Arch, bytes_required, addr::Ptr{Void})
     triple = "x86_64-apple-darwin15.0.0"
     DC = ccall(:jl_LLVMCreateDisasm, Ptr{Void},
         (Ptr{UInt8},Ptr{Void},Cint,Ptr{Void},Ptr{Void}),
@@ -410,7 +480,6 @@ function determine_nbytes_to_replace(bytes_required, addr::Ptr{Void})
     @assert DC != C_NULL
 
     nbytes = 0
-    template = hook_asm_template()
     while nbytes < bytes_required
         outs = Ref{UInt8}()
         nbytes += ccall(:jl_LLVMDisasmInstruction, Csize_t,
@@ -422,9 +491,13 @@ function determine_nbytes_to_replace(bytes_required, addr::Ptr{Void})
             outs, 1      # OutString
             )
     end
-    
+
     nbytes
 end
+
+# PowerPC is a fixed-length encoding
+determine_nbytes_to_replace(::PowerPC64.PowerPC64Arch, bytes_required, _) = bytes_required
+
 function determine_nbytes_to_replace(bytes_required, orig_bytes)
     determine_nbytes_to_replace(bytes_required, Ptr{Void}(pointer(orig_bytes)))
 end
@@ -434,8 +507,8 @@ function hook(callback::Function, addr; auto_suspend = false)
     # Ideally we would also check for uses of rip and branches here and error
     # out if any are found, but for now we don't need to
 
-    template = hook_asm_template()
-    nbytes = determine_nbytes_to_replace(length(template), addr)
+    template = hook_asm_template(host_arch())
+    nbytes = determine_nbytes_to_replace(host_arch(), length(template), addr)
     # Record the instructions that were there originally
     dest = unsafe_wrap(Array, convert(Ptr{UInt8}, addr), (nbytes,), false)
     orig_data = copy(dest)
@@ -452,7 +525,7 @@ end
 
 function hook(thehook::Hook)
     nbytes = length(thehook.orig_data)
-    template = hook_asm_template();
+    template = hook_asm_template(host_arch());
     hook_asm = [ template; fill(0x90,nbytes-length(template)) ]# Pad to nbytes
 
     dest = unsafe_wrap(Array, convert(Ptr{UInt8}, thehook.addr),

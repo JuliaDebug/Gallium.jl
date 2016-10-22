@@ -27,6 +27,7 @@ module Gallium
     using .Registers
     using .Registers: ip, get_dwarf
     using .Hooking
+    using .Hooking: host_arch
 
     type JuliaStackFrame
         oh
@@ -315,14 +316,17 @@ module Gallium
         end
     end
 
-    function step_first!(RC)
+    function step_first!(::X86_64.X86_64Arch, RC)
         set_ip!(RC,unsafe_load(convert(Ptr{UInt},get_dwarf(RC,:rsp)[])))
         set_sp!(RC,get_dwarf(RC,:rsp)[]+sizeof(Ptr{Void}))
     end
 
-    function rec_backtrace_hook(callback, RC, session = LocalSession(), modules = active_modules, ip_only = false)
+    function step_first!(::PowerPC64.PowerPC64Arch, RC)
+    end
+
+    function rec_backtrace_hook(callback, RC, session = LocalSession(), modules = active_modules, ip_only = false, arch = host_arch())
         callback(RC) || return
-        step_first!(RC)
+        step_first!(arch, RC)
         rec_backtrace(callback, RC, session, modules, ip_only; stacktop = false)
     end
 
