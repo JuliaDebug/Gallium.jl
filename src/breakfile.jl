@@ -139,5 +139,6 @@ function breakpoint(file::AbstractString, line::Int)
         warn("No file $file found in loaded packages or included files.")
     end
     unshift!(bp.sources, FileLineSource(bp, file, line))
+    push!(breakpoints, bp)
     bp
 end
