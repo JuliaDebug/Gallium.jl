@@ -13,22 +13,6 @@ module Gallium
     # Debugger User Interface
     export breakpoint, @enter, @breakpoint, @conditional
 
-    include("remote.jl")
-    include("registers.jl")
-    include("x86_64/registers.jl")
-    include("x86_32/registers.jl")
-    include("powerpc64le/registers.jl")
-    include("win64seh.jl")
-    include("modules.jl")
-    include("unwind.jl")
-    include("Hooking/Hooking.jl")
-    include("ptrace.jl")
-
-    using .Registers
-    using .Registers: ip, get_dwarf
-    using .Hooking
-    using .Hooking: host_arch
-
     type JuliaStackFrame
         oh
         file
@@ -48,6 +32,22 @@ module Gallium
         declline::Int
         stacktop::Bool
     end
+
+    include("remote.jl")
+    include("registers.jl")
+    include("x86_64/registers.jl")
+    include("x86_32/registers.jl")
+    include("powerpc64le/registers.jl")
+    include("win64seh.jl")
+    include("modules.jl")
+    include("unwind.jl")
+    include("Hooking/Hooking.jl")
+    include("ptrace.jl")
+
+    using .Registers
+    using .Registers: ip, get_dwarf
+    using .Hooking
+    using .Hooking: host_arch
 
     # Fake "Interpreter" that is just a native stack
     immutable NativeStack
@@ -117,7 +117,8 @@ module Gallium
     using DWARF: CallFrameInfo
     function ASTInterpreter.execute_command(state, x::GalliumFrame, ::Val{:cfi}, command)
         verbose = false
-        if split(command, ' '; keep=false)[2] == "verbose"
+        cmds = split(command, ' '; keep=false)
+        if length(cmds) > 1 && cmds[2] == "verbose"
             verbose = true
         end
         modules = state.top_interp.modules

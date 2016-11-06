@@ -82,7 +82,7 @@ realize_cie(mod::Module, fde) = realize_cie(get_ciecache(mod), fde)
 function compute_register_states(s, base, mod, r, stacktop, ::Void)
     modrel = UInt(modulerel(mod, base, UInt(ip(r))))
     loc, fde = try
-        find_fde(mod, modrel)
+        find_fde(mod, modrel - (stacktop?0:1))
     catch e
         # As a special case, if we're in a MachO executable's entry point,
         # we probably don't have unwind info. TODO: Remove this once we support
@@ -97,7 +97,8 @@ function compute_register_states(s, base, mod, r, stacktop, ::Void)
     # Compute CFA
     target_delta::UInt64 = modrel - loc - (stacktop?0:1)
     if target_delta >= UInt(CallFrameInfo.fde_range(fde, cie))
-        error("target_delta $target_delta larger than fde_range $(UInt(CallFrameInfo.fde_range(fde, cie)))")
+        error(string(stacktop?"[At stacktop]":"",
+          "target_delta $target_delta larger than fde_range $(UInt(CallFrameInfo.fde_range(fde, cie)))"))
     end
     #out = STDOUT #IOContext(STDOUT, :reg_map => Gallium.X86_64.dwarf_numbering)
     #drs = CallFrameInfo.RegStates()
@@ -168,6 +169,8 @@ Base.length(a::TransformedArray) = length(a.arr)
 Base.size(a::TransformedArray) = size(a.arr)
 Base.getindex(a::TransformedArray, idx) = a.func(a.arr[idx])
 
+symbolicate(session, modules, frame::Gallium.CStackFrame) =
+  symbolicate(session, modules, frame.ip - (frame.stacktop?0:1))
 symbolicate(modules, ip) = symbolicate(Gallium.LocalSession(), modules, ip)
 function symbolicate(session, modules, ip)
     base, mod = try
