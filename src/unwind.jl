@@ -96,7 +96,9 @@ function compute_register_states(s, base, mod, r, stacktop, ::Void)
     cie::CIE, ccoff = realize_cieoff(fde, ciecache)
     # Compute CFA
     target_delta::UInt64 = modrel - loc - (stacktop?0:1)
-    @assert target_delta < UInt(CallFrameInfo.fde_range(fde, cie))
+    if target_delta >= UInt(CallFrameInfo.fde_range(fde, cie))
+        error("target_delta $target_delta larger than fde_range $(UInt(CallFrameInfo.fde_range(fde, cie)))")
+    end
     #out = STDOUT #IOContext(STDOUT, :reg_map => Gallium.X86_64.dwarf_numbering)
     #drs = CallFrameInfo.RegStates()
     #CallFrameInfo.dump_program(out, cie, target = UInt(target_delta), rs = drs); println(out)
@@ -178,7 +180,7 @@ function symbolicate(session, modules, ip)
     end
     symbolicate(session, base, mod, ip)
 end
-function symbolicate(session, base, mod, ip)
+function symbolicate(session, base, mod, ip, syms=Gallium.get_syms(mod))
     modrel = UInt(modulerel(mod, base, ip))
     loc = modrel
     approximate = true
@@ -192,7 +194,6 @@ function symbolicate(session, base, mod, ip)
         end
     end
     sections = Sections(Gallium.dhandle(mod))
-    syms = Gallium.get_syms(mod)
     function correct_symbol(x)
         isundef(x) && return (false, UInt64(0))
         !isa(handle(mod), COFF.COFFHandle) || COFF.isfunction(x) || return (false, UInt64(0))

@@ -116,11 +116,20 @@ module Gallium
     const GalliumFrame = Union{NativeStack, JuliaStackFrame, CStackFrame}
     using DWARF: CallFrameInfo
     function ASTInterpreter.execute_command(state, x::GalliumFrame, ::Val{:cfi}, command)
+        verbose = false
+        if split(command, ' '; keep=false)[2] == "verbose"
+            verbose = true
+        end
         modules = state.top_interp.modules
         mod, base, ip = modbaseip_for_stack(state, x)
         modrel = UInt(ip - base)
         loc, fde = Unwinder.find_fde(mod, modrel)
         cie = realize_cie(fde)
+        if verbose
+            println(STDOUT, "Module Base:", base)
+            println(STDOUT, "IP:", base)
+            println(STDOUT, "FDE loc:", loc)
+        end
         target_delta = modrel - loc
         out = IOContext(STDOUT, :reg_map =>
             isa(Gallium.getarch(state.top_interp.session),Gallium.X86_64.X86_64Arch) ?

@@ -75,6 +75,17 @@ function load{T}(mem::FakeMemorySession, ptr::RemotePtr{T})
     error("Address $ptr not found")
 end
 
+function load{T}(mem::FakeMemorySession, ptr::RemotePtr{T}, count)
+    size = sizeof(T) * count
+    for (addr, data) in mem.memory_maps
+        if addr <= UInt64(ptr) <= addr + sizeof(data) - size
+            start = (UInt64(ptr)-addr)
+            return reinterpret(T,data[1+start:start+size])
+        end
+    end
+    error("Address $ptr not found")
+end
+
 function store!{T}(session::FakeMemorySession, ptr::RemotePtr{T}, val::T)
     for (addr, data) in mem.memory_maps
         if addr <= UInt64(ptr) <= addr + sizeof(data)

@@ -82,8 +82,9 @@ function get_syms(mod)
 end
 
 function make_inverse_symtab(h)
-    sects = Sections(h)
-    UInt32[symbolnum(x) for x in sort!(collect(get_syms(h)), by = x->symbolvalue(x,sects))]
+    sects = collect(Sections(h))
+    first_ph_vaddr = isa(h, ELF.ELFHandle) ? ELF.compute_first_ph_vaddr(h) : 0
+    UInt32[symbolnum(x) for x in sort!(collect(get_syms(h)), by = x->symbolvalue(x,sects,first_ph_vaddr))]
 end
 
 function compute_mod_size(h)
@@ -165,9 +166,14 @@ end
     end
 end
 
+filter_named_sections(sects::ObjFileBase.Sections, name) = filter(x->!isBSS(x) &&
+      (sectionname(x)==mangle_sname(handle(sects),name)), sects)
+filter_named_sections(h, name) = filter_named_sections(Sections(handle(h)), name)
+
 find_ehframes{T<:Union{ELF.ELFHandle,MachO.MachOHandle}}(sects::ObjFileBase.Sections{T}) =
-    collect(filter(x->sectionname(x)==mangle_sname(handle(sects),"eh_frame"),sects))
-find_ehframes{T<:COFF.COFFHandle}(sects::ObjFileBase.Sections{T}) = collect(filter(x->sectionname(x)==mangle_sname(handle(sects),"debug_frame"),sects))
+    collect(filter_named_sections(sects, "eh_frame"))
+find_ehframes{T<:COFF.COFFHandle}(sects::ObjFileBase.Sections{T}) =
+    collect(filter_named_sections(sects, "debug_frame"))
 find_ehframes(h::ObjFileBase.ObjectHandle) = find_ehframes(Sections(h))
 function find_ehframes(h::MachO.MachOHandle)
     mapreduce(x->find_ehframes(Sections(x)), vcat,
@@ -176,7 +182,7 @@ end
 function find_ehframes{T}(m::Module{T})
     (get(m.eh_frame)::SectionRef(T),)
 end
-_find_eh_frame_hdr(h) = filter(x->sectionname(x)==mangle_sname(handle(h),"eh_frame_hdr"),Sections(handle(h)))
+_find_eh_frame_hdr(h) = filter_named_sections(h, "eh_frame_hdr")
 function find_eh_frame_hdr(h)
     first(_find_eh_frame_hdr(h))
 end
