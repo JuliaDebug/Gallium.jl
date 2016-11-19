@@ -1,14 +1,6 @@
 # cpp jumpto-x86_64-elf.s | ~/julia-debugger/usr/bin/llvm-mc -filetype=obj - -o elfjump.o
 
-.text
-.align 4,0x90
-.globl hooking_jl_jumpto
-hooking_jl_jumpto:
-nop
-# Restore FP and SSE state (RFBM = 0b11)
-movq $3, %rax
-xor %rdx, %rdx
-xrstor  UC_MCONTEXT_SIZE(%rdi)
+.macro RESTORE_GPREGS_AND_JMP
 movq    UC_MCONTEXT_GREGS_RSP(%rdi), %rax # rax holds new stack pointer
 subq    $16, %rax
 movq    %rax, UC_MCONTEXT_GREGS_RSP(%rdi)
@@ -40,5 +32,35 @@ movq     UC_MCONTEXT_GREGS_R15(%rdi), %r15
 movq    UC_MCONTEXT_GREGS_RSP(%rdi), %rsp  # cut back rsp to new location
 pop     %rdi            # rdi was saved here earlier
 ret                     # rip was saved here
+.endm
+
+.text
+.align 4,0x90
+.globl hooking_jl_jumpto
+hooking_jl_jumpto:
+nop
+# Restore FP and SSE state (RFBM = 0b11)
+movq $3, %rax
+xor %rdx, %rdx
+xrstor  UC_MCONTEXT_SIZE(%rdi)
+
+RESTORE_GPREGS_AND_JMP
+
+.text
+.align 4,0x90
+.globl hooking_jl_jumpto_legacy
+hooking_jl_jumpto_legacy:
+nop
+movq 287+UC_MCONTEXT_SIZE     (%rdi), %xmm8
+movq 287+UC_MCONTEXT_SIZE+0x08(%rdi), %xmm9
+movq 287+UC_MCONTEXT_SIZE+0x10(%rdi), %xmm10
+movq 287+UC_MCONTEXT_SIZE+0x18(%rdi), %xmm11
+movq 287+UC_MCONTEXT_SIZE+0x20(%rdi), %xmm12
+movq 287+UC_MCONTEXT_SIZE+0x28(%rdi), %xmm13
+movq 287+UC_MCONTEXT_SIZE+0x30(%rdi), %xmm14
+movq 287+UC_MCONTEXT_SIZE+0x38(%rdi), %xmm15
+fxrstor  UC_MCONTEXT_SIZE(%rdi)
+
+RESTORE_GPREGS_AND_JMP
 
 .section	.note.GNU-stack,"",@progbits

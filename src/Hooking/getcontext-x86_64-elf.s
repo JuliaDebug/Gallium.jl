@@ -4,10 +4,10 @@
 # the address of the stack buffer as that function's first
 # argument.
 
-.text
-.align 4,0x90
-.globl hooking_jl_savecontext
-hooking_jl_savecontext:
+# We will use the gpregs saving code twice, once in the xsave code path and
+# once in the legacy fxsave code path, make it a macro.
+
+.macro SAVE_GPREGS
 nop
 pushq   %rbp
 movq    %rsp, %rbp
@@ -39,6 +39,14 @@ movq    %r12, UC_MCONTEXT_GREGS_R12(%rsp)
 movq    %r13, UC_MCONTEXT_GREGS_R13(%rsp)
 movq    %r14, UC_MCONTEXT_GREGS_R14(%rsp)
 movq    %r15, UC_MCONTEXT_GREGS_R15(%rsp)
+.endm
+
+.text
+.align 4,0x90
+.globl hooking_jl_savecontext
+.type hooking_jl_savecontext, @function
+hooking_jl_savecontext:
+SAVE_GPREGS
 
 # Save FP and SSE state (RFBM = 0b11)
 movq $3, %rax
@@ -57,6 +65,7 @@ movq    %rbx,   0x38+512+UC_MCONTEXT_SIZE(%rsp)
 
 # The actual xsave
 xsave   UC_MCONTEXT_SIZE(%rsp)
+
 movq    %rsp,    %rdi
 
 # Align stack for call
@@ -65,11 +74,34 @@ pushq   %rsi           # Makes the debugger's life easier
 movq hooking_jl_callback@GOTPCREL(%rip), %rax
 jmpq *(%rax)
 
-
 .text
 .align 4,0x90
-.globl hooking_jl_simple_savecontext
-hooking_jl_simple_savecontext:
+.globl hooking_jl_savecontext_legacy
+.type hooking_jl_savecontext_legacy, @function
+hooking_jl_savecontext_legacy:
+SAVE_GPREGS
+
+# Use fxsave for floating point state, and xmm0-7.
+# Then, manually fill in xmm8-xmm15
+fxsave UC_MCONTEXT_SIZE(%rsp)
+movq %xmm8 , 287+UC_MCONTEXT_SIZE     (%rsp)
+movq %xmm9 , 287+UC_MCONTEXT_SIZE+0x08(%rsp)
+movq %xmm10, 287+UC_MCONTEXT_SIZE+0x10(%rsp)
+movq %xmm11, 287+UC_MCONTEXT_SIZE+0x18(%rsp)
+movq %xmm12, 287+UC_MCONTEXT_SIZE+0x20(%rsp)
+movq %xmm13, 287+UC_MCONTEXT_SIZE+0x28(%rsp)
+movq %xmm14, 287+UC_MCONTEXT_SIZE+0x30(%rsp)
+movq %xmm15, 287+UC_MCONTEXT_SIZE+0x38(%rsp)
+
+movq    %rsp,    %rdi
+
+# Align stack for call
+subq    $8, %rsp
+pushq   %rsi           # Makes the debugger's life easier
+movq hooking_jl_callback@GOTPCREL(%rip), %rax
+jmpq *(%rax)
+
+.macro SAVE_GPREGS_SIMPLE
 nop
 movq    %rax, UC_MCONTEXT_GREGS_RAX(%rdi)
 movq    %rbx, UC_MCONTEXT_GREGS_RBX(%rdi)
@@ -90,6 +122,13 @@ movq    %r14, UC_MCONTEXT_GREGS_R14(%rdi)
 movq    %r15, UC_MCONTEXT_GREGS_R15(%rdi)
 movq    (%rsp),%rsi
 movq    %rsi, UC_MCONTEXT_GREGS_RIP(%rdi) # store return address as rip
+.endm
+
+.text
+.align 4,0x90
+.globl hooking_jl_simple_savecontext
+hooking_jl_simple_savecontext:
+SAVE_GPREGS_SIMPLE
 
 # Save FP and SSE state (RFBM = 0b11)
 movq $3, %rax
@@ -108,6 +147,24 @@ movq    %rsi,   0x38+512+UC_MCONTEXT_SIZE(%rdi)
 
 # The actual xsave
 xsave   UC_MCONTEXT_SIZE(%rdi)
+
+retq
+
+.text
+.align 4,0x90
+.globl hooking_jl_simple_savecontext_legacy
+hooking_jl_simple_savecontext_legacy:
+SAVE_GPREGS_SIMPLE
+
+fxsave UC_MCONTEXT_SIZE(%rdi)
+movq %xmm8 , 287+UC_MCONTEXT_SIZE     (%rdi)
+movq %xmm9 , 287+UC_MCONTEXT_SIZE+0x08(%rdi)
+movq %xmm10, 287+UC_MCONTEXT_SIZE+0x10(%rdi)
+movq %xmm11, 287+UC_MCONTEXT_SIZE+0x18(%rdi)
+movq %xmm12, 287+UC_MCONTEXT_SIZE+0x20(%rdi)
+movq %xmm13, 287+UC_MCONTEXT_SIZE+0x28(%rdi)
+movq %xmm14, 287+UC_MCONTEXT_SIZE+0x30(%rdi)
+movq %xmm15, 287+UC_MCONTEXT_SIZE+0x38(%rdi)
 
 retq
 

@@ -176,7 +176,8 @@ end
 
 # For x86_64: The text section of jumpto-x86_64-macho.o minus one byte (retq)
 # For powerpc64: Everything until ld %r0, UC_MCONTEXT_GREGS_PC(%r3)
-const resume_length = Sys.ARCH == :x86_64 ? 0x6c : 0x128
+const regular_resume_length = Sys.ARCH == :x86_64 ? 0x6c : 0x128
+const legacy_resume_length = 0xaa
 
 function hook_asm_template(hook_addr, target_addr; call = true)
     diff = (target_addr - (hook_addr + 5))%Int32
@@ -405,16 +406,40 @@ if !haskey(ENV,"GALLIUM_REBUILDING_HOOKING")
     const hooking_lib = joinpath(dirname(@__FILE__),string("hooking-",Sys.ARCH))
     global __init__
 
+    const CPUID_GETFEATURES = 0x01
+    const CPUID_XSAVE_BIT = UInt(1) << 26
+    function legacy_cpu()
+        if Sys.ARCH == :x86_64
+            cpuinfo = Ref{NTuple{4, UInt32}}()
+            ccall(:jl_cpuid, Void, (Ref{NTuple{4, UInt32}}, UInt32), cpuinfo, CPUID_GETFEATURES)
+            return (cpuinfo[][3] & CPUID_XSAVE_BIT) == 0 # ecx & CPUID_XSAVE_BIT
+        else
+            # No legacy configuration on other architectures currently
+            return false
+        end
+    end
+
+    
     function __init__()
         global resume
         global thehook
         global callback_rwx
         global resume_instructions
+        global running_on_legacy_cpu
         here = dirname(@__FILE__)
         function resume(RC)
             ccall((:hooking_jl_jumpto, hooking_lib),Void,(Ptr{UInt8},),pointer(RC.data))
         end
-        theresume = cglobal((:hooking_jl_jumpto, hooking_lib), Ptr{UInt8})
+        running_on_legacy_cpu = legacy_cpu()
+        if legacy_cpu()
+            thehook = cglobal((:hooking_jl_savecontext_legacy, hooking_lib), Ptr{UInt8})
+            theresume = cglobal((:hooking_jl_jumpto_legacy, hooking_lib), Ptr{UInt8})
+            resume_length = legacy_resume_length
+        else
+            thehook = cglobal((:hooking_jl_savecontext, hooking_lib), Ptr{UInt8})
+            theresume = cglobal((:hooking_jl_jumpto, hooking_lib), Ptr{UInt8})
+            resume_length = regular_resume_length
+        end
         resume_instructions = unsafe_wrap(Array, convert(Ptr{UInt8}, theresume),
             (resume_length,), false)
         # Allocate an RWX page for the callback return
@@ -441,7 +466,6 @@ if !haskey(ENV,"GALLIUM_REBUILDING_HOOKING")
         thecallback = Base.cfunction(callback,Void,Tuple{Ptr{Void}})::Ptr{Void}
         ccall((:hooking_jl_set_callback, hooking_lib), Void, (Ptr{Void},),
             thecallback)
-        thehook = cglobal((:hooking_jl_savecontext, hooking_lib), Ptr{UInt8})
     end
 end
 
@@ -565,7 +589,11 @@ unhook(hook::Hook) = unhook(hook.addr)
 
 @inline function getcontext()
     RCnew, rcptr = aligned_xsave_RC()
-    ccall((:hooking_jl_simple_savecontext, hooking_lib),Void,(Ptr{UInt64},),rcptr)
+    if running_on_legacy_cpu
+      ccall((:hooking_jl_simple_savecontext_legacy, hooking_lib),Void,(Ptr{UInt64},),rcptr)
+    else
+      ccall((:hooking_jl_simple_savecontext, hooking_lib),Void,(Ptr{UInt64},),rcptr)
+    end
     RC = X86_64.BasicRegs()
     for i in X86_64.basic_regs
         set_dwarf!(RC, i, RegisterValue{UInt64}(unsafe_load(Ptr{UInt64}(rcptr),i+1), (-1%UInt64)))

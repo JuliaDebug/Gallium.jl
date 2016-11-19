@@ -1,3 +1,4 @@
+ENV["GALLIUM_REBUILDING_HOOKING"] = "1"
 using Gallium
 function rebuild_lib(file, triple, oname)
     contents = readstring(file)
