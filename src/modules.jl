@@ -398,7 +398,7 @@ function lookup_syms(session, modules, name, n = typemax(UInt))
     ret = Any[]
     name = string(name)
     for (base, h) in module_dict(session, modules)
-      symtab = ObjFileBase.Symbols(handle(h))
+      symtab = get_syms(handle(h))
       strtab = ObjFileBase.StrTab(symtab)
       idx = findfirst(x->ObjFileBase.symname(x, strtab = strtab)==name,symtab)
       if idx != 0
@@ -411,6 +411,12 @@ function lookup_syms(session, modules, name, n = typemax(UInt))
       end
     end
     ret
+end
+
+function first_executable_segment(phs)
+    idx = findfirst(p->p.p_type==ELF.PT_LOAD &&
+                       ((p.p_flags & ELF.PF_X) != 0), phs)
+    phs[idx]
 end
 
 """
@@ -592,9 +598,7 @@ module GlibcDyldModules
     # First the main executable. To do so we need to find the image base.
     phs = ELF.ProgramHeaders(imageh)
     # We want the first loaded segment that's executable
-    idx = findfirst(p->p.p_type==ELF.PT_LOAD &&
-                       ((p.p_flags & ELF.PF_X) != 0), phs)
-    imagebase = phs[idx].p_vaddr + image_slide
+    imagebase = first_executable_segment(phs).p_vaddr + image_slide
     modules[RemotePtr{Void}(imagebase)] = mod_for_h(imageh, imagebase, "")
 
     intptr_t = isa(imageh.file, ELF.ELF64.File) ? UInt64 : UInt32

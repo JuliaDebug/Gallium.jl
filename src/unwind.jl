@@ -201,11 +201,27 @@ function symbolicate(session, base, mod, ip, syms=Gallium.get_syms(mod))
         isundef(x) && return (false, UInt64(0))
         !isa(handle(mod), COFF.COFFHandle) || COFF.isfunction(x) || return (false, UInt64(0))
         isa(handle(mod), ELF.ELFHandle) &&
-            (ELF.st_type(x) != ELF.STT_FUNC) && return (false, UInt64(0))
+            (ELF.st_type(x) != ELF.STT_FUNC) &&
+            (ELF.st_type(x) != ELF.STT_SECTION) && return (false, UInt64(0))
         value = symbolvalue(x, sections)
         #@show value
-        (true, value)
+        (true, x, value)
     end
+    is_elf_section(x) = isa(handle(syms), ELF.ELFHandle) &&
+      ELF.st_type(x) == ELF.STT_SECTION
+    function is_func_or_plt(x)
+      # Allow using the only if this is the plt
+      if isa(handle(syms), ELF.ELFHandle)
+        if ELF.st_type(x) == ELF.STT_SECTION
+          return startswith(ELF.sectionname(sections[deref(x).st_shndx+1];
+              strtab = ELF.strtab(handle(syms)), errstrtab=true),".plt")
+        elseif ELF.st_type(x) != ELF.STT_FUNC
+          return false
+        end
+      end
+      return true
+    end
+    strtab = StrTab(syms)
     if isa(mod, Gallium.Module)
         isnull(mod.inverse_symtab) &&
             (mod.inverse_symtab = Nullable(make_inverse_symtab(Gallium.dhandle(mod))))
@@ -213,9 +229,9 @@ function symbolicate(session, base, mod, ip, syms=Gallium.get_syms(mod))
             idx->symbolvalue(syms[idx], sections)), loc)
         if !approximate
             while idx <= length(syms)
-                ok, value = correct_symbol(syms[get(mod.inverse_symtab)[idx]])
+                ok, sym, value = correct_symbol(syms[get(mod.inverse_symtab)[idx]])
                 (mod.is_jit_dobj) && (value -= base)
-                (ok && value == loc) && break
+                (ok && value == loc && is_func_or_plt(sym)) && break
                 ok && value > loc && (#=idx = 0;=# break)
                 idx += 1
             end
@@ -225,13 +241,41 @@ function symbolicate(session, base, mod, ip, syms=Gallium.get_syms(mod))
     else
         @assert !approximate
         idx = findfirst(syms) do sym
-            ok, value = correct_symbol(sym)
-            ok && value == loc
+            ok, x, value = correct_symbol(sym)
+            ok && value == loc && is_func_or_plt(x)
         end
     end
     idx == 0 && return "???"
-    name = symname(syms[idx]; strtab = StrTab(syms))
+    # If this is a section, we're at a PLT entry, so use the special PLT
+    # symbolicator
+    if is_elf_section(syms[idx])
+      name = symbolicate_plt_entry(syms, syms[idx], modrel-loc)
+    else
+      name = symname(syms[idx]; strtab = strtab)
+    end
     (!approximate, name)
+end
+
+function symbolicate_plt_entry(symbols, section_sym, offset)
+    shstrtab = ELF.strtab(handle(symbols))
+    sections = Sections(handle(section_sym))
+    plt_sec = sections[deref(section_sym).st_shndx+1]
+    name = ELF.sectionname(plt_sec; strtab = shstrtab, errstrtab=true)
+    local rel
+    if name == ".plt"
+        rel_sec = first(Gallium.filter_named_sections(sections, "rela.plt"))
+        # First entry is fake
+        rel = ELF.Relocations(rel_sec)[(div(offset, 0x10)-1)+1]
+    else
+        @assert name == ".plt.got"
+        rel_sec = first(Gallium.filter_named_sections(sections, "rela.dyn"))
+        total_plt_got_stubs = div(sectionsize(plt_sec), 0x8)
+        plt_stub_idx = div(offset, 0x8)
+        rel = ELF.Relocations(rel_sec)[end-(total_plt_got_stubs-1)+plt_stub_idx]
+    end
+    dynsym = ELF.Symbols(first(Gallium.filter_named_sections(sections, "dynsym")))
+    target_name = symname(dynsym[ELF.r_sym(rel) + 1], strtab=StrTab(dynsym))
+    return string("PLT entry for ", target_name)
 end
 
 function fetch_cfi_val_value(s, r, resolution, cfa_addr)
