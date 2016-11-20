@@ -35,9 +35,9 @@ if Sys.ARCH == :x86_64
     run(`clang -target x86_64-pc-linux-gnu -fPIC -c -o elf-callback-x86_64.o callback.c`)
     @linux_only run(`clang -target x86_64-pc-linux-gnu -shared -o hooking-x86_64.so elfjump-x86_64.o elfhook-x86_64.o elf-callback-x86_64.o`)
 
-    rebuild_lib("getcontext-x86_64-macho.s","x86_64-apple-darwin15.3.0","machohook.o")
-    rebuild_lib("jumpto-x86_64-macho.s","x86_64-apple-darwin15.3.0","machojump.o")
-    run(`clang -target x86_64-apple-darwin15.3.0 -fPIC -c -o macho-callback.o callback.c`)
+    rebuild_lib("getcontext-x86_64-macho.s","x86_64-apple-darwin15.3.0","machohook-x86_64.o")
+    rebuild_lib("jumpto-x86_64-macho.s","x86_64-apple-darwin15.3.0","machojump-x86_64.o")
+    run(`clang -target x86_64-apple-darwin15.3.0 -fPIC -c -o macho-callback-x86_64.o callback.c`)
     @osx_only run(`clang -target x86_64-apple-darwin15.3.0 -shared -o hooking-x86_64.dylib machojump-x86_64.o machohook-x86_64.o macho-callback-x86_64.o`)
 
     if is_windows() || haskey(ENV, "WIN64_SYSROOT")

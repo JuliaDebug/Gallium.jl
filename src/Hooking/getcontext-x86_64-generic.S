@@ -1,5 +1,7 @@
-.macro SAVE_GPREGS
-nop
+# Parameterless macros are treated differently on Darwin (causing
+# conflicts with the interpretation for Linux/Windows). Add a fake one
+.macro SAVE_GPREGS fakeparam=nop
+\fakeparam
 pushq   %rbp
 movq    %rsp, %rbp
 subq    $UC_MCONTEXT_TOTAL_SIZE,    %rsp
@@ -7,7 +9,7 @@ subq    $UC_MCONTEXT_TOTAL_SIZE,    %rsp
 andq    $-64, %rsp
 subq    $8, %rsp
 # Get rax from one above the stack pointer
-# (caller's responsibility to save)
+# (caller is responsible for saving)
 movq    16(%rbp),%rax
 
 movq    %rax, UC_MCONTEXT_GREGS_RAX(%rsp)

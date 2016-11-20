@@ -1,4 +1,4 @@
-.macro RESTORE_GPREGS_AND_JMP_SYSV
+.macro RESTORE_GPREGS_AND_JMP_SYSV fakeparam=nop
 movq    UC_MCONTEXT_GREGS_RSP(%rdi), %rax # rax holds new stack pointer
 subq    $16, %rax
 movq    %rax, UC_MCONTEXT_GREGS_RSP(%rdi)
@@ -30,6 +30,7 @@ movq     UC_MCONTEXT_GREGS_R15(%rdi), %r15
 movq    UC_MCONTEXT_GREGS_RSP(%rdi), %rsp  # cut back rsp to new location
 pop     %rdi            # rdi was saved here earlier
 ret                     # rip was saved here
+\fakeparam
 .endm
 
 .macro XSAVE_RESTORE buf=%rdi

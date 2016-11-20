@@ -4,18 +4,16 @@
 
 .text
 .align 4,0x90
-.globl hooking_jl_jumpto
-.type hooking_jl_jumpto,@function
-hooking_jl_jumpto:
+.globl _hooking_jl_jumpto
+_hooking_jl_jumpto:
 nop
 XSAVE_RESTORE buf=%rdi
 RESTORE_GPREGS_AND_JMP_SYSV
 
 .text
 .align 4,0x90
-.globl hooking_jl_jumpto_legacy
-.type hooking_jl_jumpto_legacy,@function
-hooking_jl_jumpto_legacy:
+.globl _hooking_jl_jumpto_legacy
+_hooking_jl_jumpto_legacy:
 nop
 FXSAVE_RESTORE buf=%rdi
 RESTORE_GPREGS_AND_JMP_SYSV
