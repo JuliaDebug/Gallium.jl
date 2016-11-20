@@ -1,14 +1,6 @@
 # cpp jumpto-x86_64-elf.s | ~/julia-debugger/usr/bin/llvm-mc -filetype=obj - -o elfjump.o
 
-.text
-.align 4,0x90
-.globl hooking_jl_jumpto
-hooking_jl_jumpto:
-nop
-# Restore FP and SSE state (RFBM = 0b11)
-movq $3, %rax
-xor %rdx, %rdx
-xrstor  UC_MCONTEXT_SIZE(%rcx)
+.macro RESTORE_GPREGS_AND_JMP_WIN64
 movq    UC_MCONTEXT_GREGS_RSP(%rcx), %rax # rax holds new stack pointer
 subq    $16, %rax
 movq    %rax, UC_MCONTEXT_GREGS_RSP(%rcx)
@@ -40,3 +32,22 @@ movq     UC_MCONTEXT_GREGS_R15(%rcx), %r15
 movq    UC_MCONTEXT_GREGS_RSP(%rcx), %rsp  # cut back rsp to new location
 pop     %rcx            # rcx was saved here earlier
 ret                     # rip was saved here
+.endm
+
+.include "jumpto-x86_64-generic.S"
+
+.text
+.align 4,0x90
+.globl hooking_jl_jumpto
+hooking_jl_jumpto:
+nop
+XSAVE_RESTORE buf=%rcx
+RESTORE_GPREGS_AND_JMP_WIN64
+
+.text
+.align 4,0x90
+.globl hooking_jl_jumpto_legacy
+hooking_jl_jumpto_legacy:
+nop
+FXSAVE_RESTORE buf=%rcx
+RESTORE_GPREGS_AND_JMP_WIN64

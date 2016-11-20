@@ -1,41 +1,23 @@
 # llvm-mc -filetype=obj jumpto-x86_64-macho.s -o machojump.o
+
+.include "jumpto-x86_64-generic.S"
+
 .text
 .align 4,0x90
-.globl _hooking_jl_jumpto
-_hooking_jl_jumpto:
-int $3
-# Restore FP and SSE state (RFBM = 0b11)
-movq $3, %rax
-xor %rdx, %rdx
-xrstor  UC_MCONTEXT_SIZE(%rdi)
-movq    UC_MCONTEXT_GREGS_RSP(%rdi), %rax # rax holds new stack pointer
-subq    $16, %rax
-movq    %rax, 56(%rdi)
-movq    UC_MCONTEXT_GREGS_RDI(%rdi), %rbx  # store new rdi on new stack
-movq    %rbx, 0(%rax)
-movq    UC_MCONTEXT_GREGS_RIP(%rdi), %rbx # store new rip on new stack
-movq    %rbx, 8(%rax)
-# restore all registers
-movq     UC_MCONTEXT_GREGS_RAX(%rdi), %rax
-movq     UC_MCONTEXT_GREGS_RBX(%rdi), %rbx
-movq     UC_MCONTEXT_GREGS_RCX(%rdi), %rcx
-movq     UC_MCONTEXT_GREGS_RDX(%rdi), %rdx
-# restore rdi later
-movq     UC_MCONTEXT_GREGS_RSI(%rdi), %rsi
-movq     UC_MCONTEXT_GREGS_RBP(%rdi), %rbp
-# restore rsp later
-movq     UC_MCONTEXT_GREGS_R8(%rdi), %r8
-movq     UC_MCONTEXT_GREGS_R9(%rdi), %r9
-movq     UC_MCONTEXT_GREGS_R10(%rdi), %r10
-movq     UC_MCONTEXT_GREGS_R11(%rdi), %r11
-movq     UC_MCONTEXT_GREGS_R12(%rdi), %r12
-movq     UC_MCONTEXT_GREGS_R13(%rdi), %r13
-movq     UC_MCONTEXT_GREGS_R14(%rdi), %r14
-movq     UC_MCONTEXT_GREGS_R15(%rdi), %r15
-# skip rflags
-# skip cs
-# skip fs
-# skip gs
-movq    UC_MCONTEXT_GREGS_RSP(%rdi), %rsp  # cut back rsp to new location
-pop     %rdi            # rdi was saved here earlier
-ret                     # rip was saved here
+.globl hooking_jl_jumpto
+.type hooking_jl_jumpto,@function
+hooking_jl_jumpto:
+nop
+XSAVE_RESTORE buf=%rdi
+RESTORE_GPREGS_AND_JMP_SYSV
+
+.text
+.align 4,0x90
+.globl hooking_jl_jumpto_legacy
+.type hooking_jl_jumpto_legacy,@function
+hooking_jl_jumpto_legacy:
+nop
+FXSAVE_RESTORE buf=%rdi
+RESTORE_GPREGS_AND_JMP_SYSV
+
+.subsections_via_symbols
