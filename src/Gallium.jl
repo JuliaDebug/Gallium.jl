@@ -127,9 +127,10 @@ module Gallium
         loc, fde = Unwinder.find_fde(mod, modrel)
         cie = realize_cie(fde)
         if verbose
-            println(STDOUT, "Module Base:", base)
-            println(STDOUT, "IP:", base)
-            println(STDOUT, "FDE loc:", loc)
+            println(STDOUT, "Module Base: 0x", hex(base))
+            println(STDOUT, "IP: 0x", hex(UInt64(ip)))
+            println(STDOUT, "FDE loc: 0x", hex(loc))
+            println(STDOUT, "Modrel: 0x", hex(modrel))
         end
         target_delta = modrel - loc
         out = IOContext(STDOUT, :reg_map =>
@@ -191,15 +192,17 @@ module Gallium
     end
 
     function compute_ip(handle, base, theip)
-        if isa(handle, ELF.ELFHandle)
+        if ObjFileBase.isrelocatable(handle)
+            UInt(theip)
+        elseif isa(handle, ELF.ELFHandle)
             phs = ELF.ProgramHeaders(handle)
             idx = findfirst(p->p.p_offset==0&&p.p_type==ELF.PT_LOAD, phs)
             UInt(theip + (phs[idx].p_vaddr-base))
         elseif isa(handle, COFF.COFFHandle)
             # Map from loaded address to file address
             UInt(theip) + (UInt(COFF.readoptheader(handle).windows.ImageBase) - UInt(base))
-        elseif ObjFileBase.isrelocatable(handle)
-            UInt(theip)
+        else
+            error("Don't know how to compute ip")
         end
     end
 
@@ -474,6 +477,9 @@ module Gallium
                 allow_bad_unwind::Bool || rethrow(err)
                 return false, Nullable(CStackFrame(theip, file, line, declfile, declline, firstframe))
             end
+            if isa(h, SyntheticModule)
+                return (true, Nullable(CStackFrame(theip, file, line, declfile, declline, firstframe)))
+            end
             if rich_c
                 dh = dhandle(h)
                 lip = compute_ip(dh, sstart, theip-(firstframe?0:1))
@@ -592,11 +598,11 @@ module Gallium
     end
 
     function stackwalk(RC, session = LocalSession(), modules = active_modules;
-            fromhook = false, rich_c = false, ip_only = false, collectRCs=false)
+            fromhook = false, rich_c = false, ip_only = false, collectRCs=false, cficache=nothing)
         stack = Any[]
         RCs = Any[]
         firstframe = true
-        (fromhook ? rec_backtrace_hook : rec_backtrace)(RC, session, modules, ip_only) do RC
+        (fromhook ? rec_backtrace_hook : rec_backtrace)(RC, session, modules, ip_only, cficache) do RC
             keep_walking, frame = frameinfo(RC, session, modules, rich_c = rich_c, firstframe = firstframe)
             !isnull(frame) && (push!(stack, get(frame));
                 collectRCs && push!(RCs, RC))

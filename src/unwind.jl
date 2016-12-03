@@ -13,7 +13,8 @@ using ObjFileBase: Sections, mangle_sname
 using ELF
 using MachO
 using COFF
-using Gallium: find_module, Module, load, make_fdetab, make_inverse_symtab
+using Gallium: find_module, SyntheticModule, ConcreteModule, Module, load,
+  make_fdetab, make_inverse_symtab
 import Gallium: symbolicate
 
 typealias CFICacheEntry Tuple{CallFrameInfo.RegStates,CallFrameInfo.CIE,UInt}
@@ -24,11 +25,12 @@ end
 
 CFICache(sz::Int) = CFICache(sz, Dict{RemotePtr{Void}, Tuple{CallFrameInfo.RegStates,CallFrameInfo.CIE,UInt}}())
 
-function get_word(s::Gallium.LocalSession, ptr::RemotePtr)
+function get_word{T}(s::Gallium.LocalSession, ptr::RemotePtr, ::Type{T}=Gallium.intptr(Gallium.getarch(s)))
     Gallium.Hooking.mem_validate(UInt(ptr), sizeof(Ptr{Void})) || error("Invalid load")
-    UInt64(load(s, RemotePtr{Gallium.intptr(Gallium.getarch(s))}(ptr)))
+    UInt64(load(s, RemotePtr{T}(ptr)))
 end
-get_word(s, ptr::RemotePtr) = UInt64(load(s, RemotePtr{Gallium.intptr(Gallium.getarch(s))}(ptr)))
+get_word{T}(s, ptr::RemotePtr, ::Type{T}=Gallium.intptr(Gallium.getarch(s))) =
+  UInt64(load(s, RemotePtr{T}(ptr)))
 
 function find_fde(mod, modrel)
     slide = 0
@@ -128,9 +130,11 @@ immutable Frame
 end
 
 function evaluate_cfi_expr(opcodes, s, r, rs)
-    sm = DWARF.Expressions.StateMachine{UInt64}() # typeof(unsigned(ip(r)))
+    # wordT= Gallium.intptr(Gallium.getarch(s)), but this is hot, so we can't really afford it
+    wordT = UInt64
+    sm = DWARF.Expressions.StateMachine{wordT}() # typeof(unsigned(ip(r)))
     getreg(reg) = get_dwarf(r, reg)
-    getword(addr) = get_word(s, RemotePtr{UInt64}(addr))[]
+    getword(addr) = get_word(s, RemotePtr{wordT}(addr), wordT)[]
     addr_func(addr) = addr
     loc = DWARF.Expressions.evaluate_simple_location(sm, opcodes, getreg, getword, addr_func, :NativeEndian)
     if isa(loc, DWARF.Expressions.RegisterLocation)
@@ -148,7 +152,7 @@ function compute_cfa_addr(s, r, rs)
         if rs.cfa.flag != CallFrameInfo.Flag.Val
             error("invalid CFA value $(rs.cfa)")
         end
-        cfa_addr = RemotePtr{Void}(convert(Int, get_dwarf(r, Int(rs.cfa.base)) + rs.cfa.offset))
+        cfa_addr = RemotePtr{Void}(get_dwarf(r, Int(rs.cfa.base))%UInt64 + rs.cfa.offset%UInt64)
     else
         cfa_addr = evaluate_cfa_expr(s, r, rs)
     end
@@ -183,6 +187,9 @@ function symbolicate(session, modules, ip)
     end
     symbolicate(session, base, mod, ip)
 end
+function symbolicate(session, base, mod::SyntheticModule, ip, _=nothing)
+    mod.symbolicate(session, ip)
+end
 function symbolicate(session, base, mod, ip, syms=Gallium.get_syms(mod))
     modrel = UInt(modulerel(mod, base, ip))
     loc = modrel
@@ -190,7 +197,14 @@ function symbolicate(session, base, mod, ip, syms=Gallium.get_syms(mod))
     try
         if !isnull(mod.eh_frame)
             loc, fde = find_fde(mod, modrel)
-            approximate = false
+            target_delta::UInt64 = modrel - loc
+            ciecache = get_ciecache(mod)
+            cie::CIE, ccoff = realize_cieoff(fde, ciecache)
+            if target_delta < UInt(CallFrameInfo.fde_range(fde, cie))
+              # If we're outside the FDE, we might as well not have found
+              # it in the first place
+              approximate = false
+            end
         elseif !isnull(mod.xpdata)
             loc = find_seh_entry(mod, modrel).start
             approximate = false
@@ -198,11 +212,11 @@ function symbolicate(session, base, mod, ip, syms=Gallium.get_syms(mod))
     end
     sections = Sections(Gallium.dhandle(mod))
     function correct_symbol(x)
-        isundef(x) && return (false, UInt64(0))
-        !isa(handle(mod), COFF.COFFHandle) || COFF.isfunction(x) || return (false, UInt64(0))
+        isundef(x) && return (false, x, UInt64(0))
+        !isa(handle(mod), COFF.COFFHandle) || COFF.isfunction(x) || return (false, x, UInt64(0))
         isa(handle(mod), ELF.ELFHandle) &&
             (ELF.st_type(x) != ELF.STT_FUNC) &&
-            (ELF.st_type(x) != ELF.STT_SECTION) && return (false, UInt64(0))
+            (ELF.st_type(x) != ELF.STT_SECTION) && return (false, x, UInt64(0))
         value = symbolvalue(x, sections)
         #@show value
         (true, x, value)
@@ -232,9 +246,11 @@ function symbolicate(session, base, mod, ip, syms=Gallium.get_syms(mod))
                 ok, sym, value = correct_symbol(syms[get(mod.inverse_symtab)[idx]])
                 (mod.is_jit_dobj) && (value -= base)
                 (ok && value == loc && is_func_or_plt(sym)) && break
-                ok && value > loc && (#=idx = 0;=# break)
+                ok && value > loc && (idx = 0; break)
                 idx += 1
             end
+        elseif !is_func_or_plt(syms[idx])
+            idx = 0
         end
         (idx == length(get(mod.inverse_symtab))+1) && (idx = 0)
         idx != 0 && (idx = get(mod.inverse_symtab)[idx])
@@ -245,7 +261,7 @@ function symbolicate(session, base, mod, ip, syms=Gallium.get_syms(mod))
             ok && value == loc && is_func_or_plt(x)
         end
     end
-    idx == 0 && return "???"
+    idx == 0 && return (false, "???")
     # If this is a section, we're at a PLT entry, so use the special PLT
     # symbolicator
     if is_elf_section(syms[idx])
@@ -325,15 +341,20 @@ end
 
 using Gallium: X86_64
 function unwind_step(s, modules, r, cfi_cache = nothing; stacktop = false, ip_only = false, allow_frame_based = true)
+    # First, find the module we're currently in
+    base, amod = find_module(s, modules, UInt(ip(r)))::Tuple{UInt64, Module}
+    modrel = UInt64(ip(r)) - base
+
+    if isa(amod, SyntheticModule)
+        return (true, (amod::SyntheticModule).unwind_step(s, base, r)::typeof(r))
+    end
+    mod::ConcreteModule = amod
+
     new_registers = copy(r)
     # A priori the registers in the new frame will not be valid, we copy them
     # over from above still and propagate as usual in case somebody wants to
     # look at them.
     invalidate_regs!(new_registers)
-
-    # First, find the module we're currently in
-    base, mod = find_module(s, modules, UInt(ip(r)))
-    modrel = UInt64(ip(r)) - base
 
     # Determine if we have windows or DWARF unwind info
     if !isnull(mod.eh_frame)

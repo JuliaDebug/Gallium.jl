@@ -8,7 +8,9 @@ Represents a debugging session with potentially one or more inferiors (e.g.
 abstract RemoteSession
 immutable LocalSession; end
 
-immutable RemotePtr{T,intptrT}
+const SupportedWordSizes = Union{UInt32, UInt64}
+
+immutable RemotePtr{T,intptrT<:SupportedWordSizes}
     ptr::intptrT
 end
 (::Type{RemotePtr{T}}){T}(arg) = RemotePtr{T,UInt64}(arg)

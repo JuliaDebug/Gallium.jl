@@ -7,13 +7,10 @@ using ObjFileBase: handle, isrelocatable, Sections, mangle_sname
 const InverseSymtab = Vector{UInt32}
 const FDETab = Vector{Tuple{Int,UInt}}
 
-"""
-Keeps a list of local modules, lazy loading those that it doesn't have from
-the current process's address space.
-"""
-type Module{T<:ObjFileBase.ObjectHandle, SR<:ObjFileBase.SectionRef}
-    handle::T
+type ConcreteModule{T<:ObjFileBase.ObjectHandle, SR<:ObjFileBase.SectionRef}
     base::UInt64
+    sz::UInt
+    handle::T
     # The .eh_frame (or .debug_frame) section when unwinding using DWARF
     eh_frame::Nullable{SR}
     # Either a DWARF or SEH header/unwind table pair
@@ -27,28 +24,46 @@ type Module{T<:ObjFileBase.ObjectHandle, SR<:ObjFileBase.SectionRef}
     inverse_symtab::Nullable{InverseSymtab}
     FDETab::Nullable{FDETab}
     ciecache::Nullable{CIECache}
-    sz::UInt
     is_jit_dobj::Bool
     is_eh_not_debug::Bool
 end
-Module(handle, eh_frame, eh_frame_hdr, dwarfhandle, FDETab, ciecache, sz) =
-    Module{typeof(handle),typeof(eh_frame)}(handle, eh_frame, eh_frame_hdr,
-        Nullable{XPUnwindRef}(), dwarfhandle, FDETab, ciecache, sz, false, true)
+
+"""
+    Entry point for users of this package to provide modules that are not backed
+    by object files.
+"""
+type SyntheticModule
+    base::UInt64
+    sz::UInt
+    # Note: ip is guaranteed to be in this module, for the next two functions
+    # (session, RC) -> RC
+    unwind_step
+    # (session, ip) -> (Bool, symb) - see symbolicate()
+    symbolicate
+    # (session, ip) -> Range
+    get_proc_bounds
+end
+
+const Module = Union{ConcreteModule,SyntheticModule}
 
 """
 A way to obtain new modules, e.g. dynamic libraries or jit modules
 """
 abstract ModuleSource
 
-immutable ModuleSet
+immutable ModuleSet{intptrT}
     sources::Vector{ModuleSource}
-    modules::Dict{RemotePtr{Void},Module}
+    modules::Dict{RemotePtr{Void, intptrT},Module}
 end
+(::ModuleSet{intptrT}){intptrT}(sources::Vector{ModuleSource},x::Dict) =
+  ModuleSet{intptrT}(sources, Dict{RemotePtr{Void, intptrT},Module}(x))
 
-type MultiASModules{T}
+type MultiASModules{F,T,S}
     new_as_callback
-    modules_by_as::Dict{T, Any}  # ASID => modules
+    modules_by_as::Dict{T, S}  # ASID => modules
 end
+MultiASModules{F,T,S}(f::F,modules_by_as::Dict{T,S}) =
+  MultiASModules{F,T,S}(f, modules_by_as)
 function current_asid
 end
 
@@ -117,7 +132,7 @@ end
 function find_module(session, modules, ip)
     ret = _find_module(module_dict(modules), ip)
     isnull(ret) && error("ip 0x$(hex(UInt(ip),2sizeof(UInt))) not found")
-    get(ret)
+    tuple(get(ret)...)
 end
 
 """
@@ -179,16 +194,16 @@ function find_ehframes(h::MachO.MachOHandle)
     mapreduce(x->find_ehframes(Sections(x)), vcat,
         filter(x->isa(deref(x), MachO.segment_commands), LoadCmds(h)))
 end
-function find_ehframes{T}(m::Module{T})
+function find_ehframes{T}(m::ConcreteModule{T})
     (get(m.eh_frame)::SectionRef(T),)
 end
 _find_eh_frame_hdr(h) = filter_named_sections(h, "eh_frame_hdr")
 function find_eh_frame_hdr(h)
     first(_find_eh_frame_hdr(h))
 end
-find_eh_frame_hdr{T}(m::Module{T}) = (get(mod.ehfr).hdr_sec)::SectionRef(T)
+find_eh_frame_hdr{T}(m::ConcreteModule{T}) = (get(mod.ehfr).hdr_sec)::SectionRef(T)
 
-find_ehfr(mod::Module) = get(mod.ehfr)
+find_ehfr(mod::ConcreteModule) = get(mod.ehfr)
 find_ehfr(h) = EhFrameRef(find_eh_frame_hdr(h), find_ehframes(h)[1])
 
 @static if is_apple()
@@ -210,12 +225,12 @@ find_ehfr(h) = EhFrameRef(find_eh_frame_hdr(h), find_ehframes(h)[1])
         vmaddr = first_actual_segment(h).vmaddr
         base += vmaddr
         modules.modules[RemotePtr{Void}(base)] =
-            Module(h, base, Nullable(ehfs[]),
+            ConcreteModule(base, compute_mod_size(h), h, Nullable(ehfs[]),
                 Nullable{EhFrameRef}(),
                 Nullable{XPUnwindRef}(),
                 obtain_dsym(fname, h), Nullable{InverseSymtab}(),
                 Nullable{FDETab}(), Nullable{CIECache}(),
-                compute_mod_size(h), false, true)
+                false, true)
         return true
     end
 
@@ -333,9 +348,9 @@ function jit_mod_for_h(buf, h, sstart)
     end
     isa(h, MachO.MachOHandle) && isempty(fdetab) && (fdetab = make_fdetab(sstart, h, true))
     eh_frame = find_ehframes(h)[]
-    Module(h, sstart, Nullable(eh_frame),
+    ConcreteModule(sstart, compute_mod_size(h), h, Nullable(eh_frame),
         ehfr, xpdata, h, Nullable{InverseSymtab}(),
-        Nullable(fdetab), Nullable{CIECache}(), compute_mod_size(h), true, true)
+        Nullable(fdetab), Nullable{CIECache}(), true, true)
 end
 
 function retrieve_obj_data(s::LocalSession, modules, ip)
@@ -359,7 +374,7 @@ end
 
 function find_module(session, modules::LazyJITModules, ip)
     ret = _find_module(module_dict(session, modules), ip)
-    return !isnull(ret) ? get(ret) : begin
+    return !isnull(ret) ? tuple(get(ret)...) : begin
         if update_shlibs!(session, modules)
             return find_module(session, modules, ip)
         end
@@ -368,15 +383,15 @@ function find_module(session, modules::LazyJITModules, ip)
         buf = IOBuffer(retrieve_obj_data(session, modules, ip), true, true)
         h = readmeta(buf)
         module_dict(modules)[sstart] = jit_mod_for_h(buf, h, sstart)
-        Pair{UInt,Any}(sstart, module_dict(session, modules)[sstart])
+        sstart, module_dict(session, modules)[sstart]
     end
 end
 find_module(modules, ip) = find_module(LocalSession(), modules, ip)
 
-function find_module(session, modules::MultiASModules, ip)
+function find_module{F,T,S}(session, modules::MultiASModules{F,T,S}, ip)
     asid = current_asid(session)
     if !haskey(modules.modules_by_as, asid)
-        modules.modules_by_as[asid] = modules.new_as_callback(session)
+        modules.modules_by_as[asid] = modules.new_as_callback(session)::S
     end
     find_module(session, modules.modules_by_as[asid], ip)
 end
@@ -398,6 +413,7 @@ function lookup_syms(session, modules, name, n = typemax(UInt))
     ret = Any[]
     name = string(name)
     for (base, h) in module_dict(session, modules)
+      isa(h, SyntheticModule) && continue
       symtab = get_syms(handle(h))
       strtab = ObjFileBase.StrTab(symtab)
       idx = findfirst(x->ObjFileBase.symname(x, strtab = strtab)==name,symtab)
@@ -508,12 +524,13 @@ module GlibcDyldModules
       ehfr = isempty(eh_frame_hdrs) ? Nullable{EhFrameRef}() :
         Nullable{EhFrameRef}(EhFrameRef(eh_frame_hdrs[], eh_frame))
       dh = search_debug_object(h, filename)
-      Gallium.Module(h, UInt64(base), Nullable(eh_frame),
+      Gallium.ConcreteModule(UInt64(base), 
+        Gallium.compute_mod_size(h), h, Nullable(eh_frame),
         ehfr, Nullable{XPUnwindRef}(), dh,
         Nullable{InverseSymtab}(),
         Nullable{FDETab}(),
         Nullable{CIECache}(),
-        Gallium.compute_mod_size(h), false, true)
+        false, true)
   end
 
   immutable GlibCRemoteSource <: ModuleSource
@@ -567,10 +584,19 @@ module GlibcDyldModules
               if lm.l_addr != 0
                   fn = mapped_file(vm, lm.l_addr)
                   if !isempty(fn)
-                      # Don't use the IOStream directly. We do a look of seeking/poking,
-                      # so loading the whole thing into memory and using an IOBuffer is
-                      # faster
-                      buf = IOBuffer(open(Base.Mmap.mmap, fn))
+                      # The vdso doesn't exist on disk. Load it from the remote
+                      # address space.
+                      if startswith(fn, "linux-vdso.so.1")
+                          # 2 pages is the current size of the vdso. If it ever
+                          # grows larger, we may have to ask for the actual
+                          # mapping size here
+                          buf = IOBuffer(load(vm, RemotePtr{UInt8}(lm.l_addr), 2*0x1000))
+                      else
+                          # Don't use the IOStream directly. We do a lot of seeking/poking,
+                          # so loading the whole thing into memory and using an IOBuffer is
+                          # faster
+                          buf = IOBuffer(open(Base.Mmap.mmap, fn))
+                      end
                       h = readmeta(buf)
                       module_dict(modules)[lm.l_addr] = mod_for_h(h, lm.l_addr, fn)
                       did_update = true
@@ -598,7 +624,7 @@ module GlibcDyldModules
     # First the main executable. To do so we need to find the image base.
     phs = ELF.ProgramHeaders(imageh)
     # We want the first loaded segment that's executable
-    imagebase = first_executable_segment(phs).p_vaddr + image_slide
+    imagebase = Gallium.first_executable_segment(phs).p_vaddr + image_slide
     modules[RemotePtr{Void}(imagebase)] = mod_for_h(imageh, imagebase, "")
 
     intptr_t = isa(imageh.file, ELF.ELF64.File) ? UInt64 : UInt32
@@ -615,7 +641,7 @@ module GlibcDyldModules
     dt_debug_addr_addr = RemotePtr{RemotePtr{r_debug{intptr_t},intptr_t},intptr_t}(
         dynamic_load_addr + (2*dt_debug_idx-1)*sizeof(intptr_t))
     source = GlibCRemoteSource(dt_debug_addr_addr)
-    modules = ModuleSet(ModuleSource[source], modules)
+    modules = ModuleSet{intptr_t}(ModuleSource[source], modules)
     update_shlibs!(vm, modules, source; current_ip=current_ip)
 
     modules
@@ -701,11 +727,13 @@ module WinDyldModules
                       ehframe
             is_eh_not_debug = !isempty(eh_frames)
         end
-        Gallium.Module(h, UInt64(dllbase), ehframe, Nullable{EhFrameRef}(),
+        Gallium.ConcreteModule(UInt64(dllbase), 
+            Gallium.compute_mod_size(h), 
+            h, ehframe, Nullable{EhFrameRef}(),
             xpdata, h,
             Nullable{InverseSymtab}(),
             Nullable{Vector{Tuple{Int,UInt}}}(),
-            Nullable{CIECache}(), Gallium.compute_mod_size(h), false, is_eh_not_debug)
+            Nullable{CIECache}(), false, is_eh_not_debug)
     end
 
     const PEB_LDR_DATA_IDX      = 3
