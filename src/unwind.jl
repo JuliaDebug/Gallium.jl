@@ -129,13 +129,16 @@ immutable Frame
     target_delta::UInt64
 end
 
-function evaluate_cfi_expr(opcodes, s, r, rs)
+function evaluate_cfi_expr(opcodes, s, r, rs, cfa_addr = nothing)
     # wordT= Gallium.intptr(Gallium.getarch(s)), but this is hot, so we can't really afford it
     wordT = UInt64
     sm = DWARF.Expressions.StateMachine{wordT}() # typeof(unsigned(ip(r)))
     getreg(reg) = get_dwarf(r, reg)
     getword(addr) = get_word(s, RemotePtr{wordT}(addr), wordT)[]
     addr_func(addr) = addr
+    if cfa_addr !== nothing
+        push!(sm.stack, cfa_addr)
+    end
     loc = DWARF.Expressions.evaluate_simple_location(sm, opcodes, getreg, getword, addr_func, :NativeEndian)
     if isa(loc, DWARF.Expressions.RegisterLocation)
         addr = RemotePtr{Void}(get_dwarf(r, loc.i))
@@ -306,7 +309,7 @@ function fetch_cfi_value(s, r, rs, reg, cfa_addr)
     resolution = rs.values[reg]
     if CallFrameInfo.isdwarfexpr(resolution)
         ve = rs.values_expr[reg]
-        val = evaluate_cfi_expr(ve.opcodes, s, r, rs)
+        val = evaluate_cfi_expr(ve.opcodes, s, r, rs, cfa_addr)
         ve.is_val || (val = get_word(s,RemotePtr{UInt64}(val)))
         return val
     elseif CallFrameInfo.issame(resolution)
