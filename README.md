@@ -65,3 +65,8 @@ Pkg.checkout("VT100")
 Pkg.checkout("JuliaParser")
 Pkg.checkout("Gallium")
 ```
+
+# Supported Architectures and OSes
+
+Gallium supports the X86-64 (Windows, Mac, Linux) and the POWER8 (Linux) architectures.
+
