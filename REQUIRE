@@ -1,10 +1,2 @@
-julia 0.5-
-TerminalUI
-DWARF
-ObjFileBase
-ELF
-MachO
-ASTInterpreter
-AbstractTrees
-COFF
-CRC
+julia 0.6
+ASTInterpreter2
