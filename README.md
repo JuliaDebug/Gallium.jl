@@ -1,17 +1,10 @@
-# Gallium
+# Gallium.jl is now deprecated. The following Julia debuggers are actively maintained:
 
-This is the julia debugger. Please note that the 0.6 version of this package
-currently does not support breakpointing, C/C++ debugging or native code
-inspection. These features are being rebuilt, but were never particularly
-reliable in prior versions of this package and a cause of instability for
-the more mature features. In exchange, this package features a signficantly
-more robust pure julia debug prompt, provided by [ASTInterpreter2](https://github.com/Keno/ASTInterpreter2.jl). Please file interpreter issues against that package.
+- [Juno](https://junolab.org) - the official integrated development environment (IDE) for the Julia language 
+- [Debugger.jl](https://github.com/JuliaDebug/Debugger.jl) - the official Julia debugger
+- [Rebugger.jl](https://github.com/timholy/Rebugger.jl) - an expression-level debugger for Julia with a provocative command-line (REPL) user interface
+- [MagneticReadHead.jl](https://github.com/oxinabox/MagneticReadHead.jl) - a powerful Julia debugger based on [Cassette.jl](https://github.com/jrevels/Cassette.jl)
 
-# Usage
+You might also enjoy:
 
-```
-using Gallium
-@enter gcd(10, 20)
-```
-
-Type `help` at the debug prompt to see a list of available commands.
+- [Traceur.jl](https://github.com/JunoLab/Traceur.jl) - runs your code and tells you about any obvious performance traps
