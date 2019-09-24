@@ -9,4 +9,4 @@
 You might also enjoy:
 
 - [Traceur.jl](https://github.com/JunoLab/Traceur.jl) - runs your code and tells you about any obvious performance traps
-- [Cthulhu.jl](https://github.com/JuliaDebug/Cthulhu.jl) - decend into julia code and see it in all its representations.
+- [Cthulhu.jl](https://github.com/JuliaDebug/Cthulhu.jl) - decend into Julia code and see it in all its representations.
